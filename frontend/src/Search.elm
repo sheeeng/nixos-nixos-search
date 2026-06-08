@@ -989,7 +989,7 @@ viewResult nixosChannels outMsg categoryName model viewSuccess viewBuckets searc
             if result.hits.total.value == 0 && List.isEmpty buckets then
                 div [ class "search-results" ]
                     [ ul [ class "search-sidebar" ] searchBuckets
-                    , viewNoResults categoryName model.query
+                    , viewNoResults categoryName model.activeOptionSource model.query model.channel
                     ]
 
             else if not (List.isEmpty buckets) then
@@ -1035,27 +1035,87 @@ viewResult nixosChannels outMsg categoryName model viewSuccess viewBuckets searc
 
 viewNoResults :
     String
+    -> Route.OptionSource
+    -> String
     -> String
     -> Html c
-viewNoResults categoryName query =
-    div [ class "search-no-results" ]
-        ([ h2 [] [ text <| "No " ++ categoryName ++ " found!" ]
-         ]
-            ++ (if categoryName == "modular services" then
-                    [ text "Not all packages provide modular services. You might want to "
-                    , Html.a [ href ("https://github.com/NixOS/nixpkgs/issues?q=" ++ query) ] [ text "search nixpkgs issues" ]
-                    , text "."
-                    ]
+viewNoResults categoryName activeOptionSource query channel =
+    let
+        nixpkgsIssues =
+            Html.a [ href ("https://github.com/NixOS/nixpkgs/issues?q=" ++ query) ]
+                [ text "search nixpkgs issues" ]
 
-                else
-                    [ text "You might want to "
-                    , Html.a [ href "https://github.com/NixOS/nixpkgs/blob/master/pkgs/README.md#quick-start-to-adding-a-package" ] [ text "add a package" ]
-                    , text " or "
-                    , Html.a [ href ("https://github.com/NixOS/nixpkgs/issues?q=" ++ query) ] [ text "search nixpkgs issues" ]
-                    , text "."
-                    ]
-               )
+        homeManagerIssues =
+            Html.a [ href ("https://github.com/nix-community/home-manager/issues?q=" ++ query) ]
+                [ text "search home-manager issues" ]
+
+        body =
+            if categoryName == "packages" then
+                [ text "You might want to "
+                , Html.a [ href "https://github.com/NixOS/nixpkgs/blob/master/pkgs/README.md#quick-start-to-adding-a-package" ]
+                    [ text "add a package" ]
+                , text " or "
+                , nixpkgsIssues
+                , text "."
+                ]
+
+            else if categoryName == "modular services" then
+                [ text "Not all packages provide modular services. You might want to "
+                , nixpkgsIssues
+                , text "."
+                ]
+
+            else if activeOptionSource == Route.HomeManagerOptionSource then
+                [ text "You might want to ", homeManagerIssues, text "." ]
+
+            else
+                [ text "You might want to ", nixpkgsIssues, text "." ]
+    in
+    div [ class "search-no-results" ]
+        (h2 [] [ text <| "No " ++ categoryName ++ " found!" ]
+            :: crossSearchHint categoryName query channel
+            ++ body
         )
+
+
+{-| Packages and options live on separate tabs, and it's easy to land on
+the wrong one (issue #1062). When a search comes up empty on one, point the
+user at the other with the same query and channel carried over.
+-}
+crossSearchHint : String -> String -> String -> List (Html c)
+crossSearchHint categoryName query channel =
+    let
+        args : Route.SearchArgs
+        args =
+            { query = Just query
+            , channel = Just channel
+            , show = Nothing
+            , from = Nothing
+            , size = Nothing
+            , buckets = Nothing
+            , sort = Nothing
+            , type_ = Nothing
+            , activeOptionSource = Route.defaultOptionSource
+            }
+
+        hint : String -> String -> Route.Route -> List (Html c)
+        hint lead linkText route =
+            [ p [ class "search-cross-hint" ]
+                [ text lead
+                , Html.a [ Route.href route ] [ text linkText ]
+                , text " instead."
+                ]
+            ]
+    in
+    case categoryName of
+        "packages" ->
+            hint "Looking for a NixOS option? " ("Search options for " ++ query) (Route.Options args)
+
+        "options" ->
+            hint "Looking for a package? " ("Search packages for " ++ query) (Route.Packages args)
+
+        _ ->
+            []
 
 
 closeButton : Html a

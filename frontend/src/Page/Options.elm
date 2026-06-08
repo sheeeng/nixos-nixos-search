@@ -1,10 +1,9 @@
-port module Page.Options exposing
+module Page.Options exposing
     ( AggregationsAll
     , Model
     , Msg(..)
     , ResultAggregations
     , ResultItemSource
-    , copyToClipboard
     , decodeResultAggregations
     , decodeResultItemSource
     , init
@@ -53,6 +52,7 @@ import Http exposing (Body)
 import Json.Decode
 import Json.Decode.Pipeline
 import List.Extra
+import Ports
 import RemoteData
 import Route exposing (OptionSource, SearchType)
 import Search
@@ -135,21 +135,12 @@ init searchArgs defaultNixOSChannel nixosChannels includeChannelInUrl model =
 
 
 
--- PORTS
-
-
-{-| Ask the JS side to copy the given text to the clipboard.
--}
-port copyToClipboard : String -> Cmd msg
-
-
-
 -- UPDATE
 
 
 type Msg
     = SearchMsg (Search.Msg ResultItemSource ResultAggregations)
-    | CopyOptionName String
+    | CopyToClipboard String
 
 
 update :
@@ -172,8 +163,8 @@ update navKey msg model nixosChannels =
             in
             ( newModel, Cmd.map SearchMsg newCmd )
 
-        CopyOptionName name ->
-            ( model, copyToClipboard name )
+        CopyToClipboard text_ ->
+            ( model, Ports.copyToClipboard text_ )
 
 
 
@@ -366,7 +357,7 @@ viewResultItem nixosChannels channel show activeSource item =
                                     |> Maybe.map
                                         (\default ->
                                             [ div [] [ text "Default" ]
-                                            , div [] <| Maybe.withDefault [ asPreCode default ] (Utils.showHtml default)
+                                            , div [] <| Maybe.withDefault [ Utils.copyable CopyToClipboard default (asPreCode default) ] (Utils.showHtml default)
                                             ]
                                         )
                                     |> Maybe.withDefault []
@@ -375,7 +366,7 @@ viewResultItem nixosChannels channel show activeSource item =
                                     |> Maybe.map
                                         (\example ->
                                             [ div [] [ text "Example" ]
-                                            , div [] <| Maybe.withDefault [ asHighlightPreCode example ] (Utils.showHtml example)
+                                            , div [] <| Maybe.withDefault [ Utils.copyable CopyToClipboard example (asHighlightPreCode example) ] (Utils.showHtml example)
                                             ]
                                         )
                                     |> Maybe.withDefault []
@@ -469,7 +460,7 @@ asHighlightPreCode value =
 {-| Render a "Usage" section showing how to use this option in the appropriate
 context, including `_class` to clarify which module system it belongs to.
 -}
-viewUsageSnippet : ResultItemSource -> List (Html msg)
+viewUsageSnippet : ResultItemSource -> List (Html Msg)
 viewUsageSnippet source =
     let
         -- Re-indent a (possibly multi-line) value so every line after the
@@ -502,13 +493,17 @@ viewUsageSnippet source =
 
         nestedOption indent =
             indent ++ source.name ++ " = " ++ leafValue indent ++ ";\n"
+
+        usage snippet =
+            [ div [] [ text "Usage" ]
+            , Utils.copyable CopyToClipboard snippet (asHighlightPreCode snippet)
+            ]
     in
     case source.docType of
         "service" ->
             case ( source.servicePackage, source.serviceModule ) of
                 ( Just pkg, Just mod_ ) ->
-                    [ div [] [ text "Usage" ]
-                    , asHighlightPreCode
+                    usage
                         ("system.services.<name> = {\n"
                             ++ "  _class = \"service\";\n"
                             ++ "  imports = [ pkgs."
@@ -519,32 +514,27 @@ viewUsageSnippet source =
                             ++ nestedOption "  "
                             ++ "};"
                         )
-                    ]
 
                 _ ->
                     []
 
         "option" ->
-            [ div [] [ text "Usage" ]
-            , asHighlightPreCode
+            usage
                 ("# configuration.nix\n"
                     ++ "{\n"
                     ++ "  _class = \"nixos\";\n"
                     ++ nestedOption "  "
                     ++ "}"
                 )
-            ]
 
         "home-manager-option" ->
-            [ div [] [ text "Usage" ]
-            , asHighlightPreCode
+            usage
                 ("# home.nix\n"
                     ++ "{\n"
                     ++ "  _class = \"homeManager\";\n"
                     ++ nestedOption "  "
                     ++ "}"
                 )
-            ]
 
         _ ->
             []
@@ -721,13 +711,7 @@ viewOptionNamePath channel activeSource optionName segments =
             [ code [ class "code-block" ]
                 (segments |> List.indexedMap renderSegment |> List.concat)
             ]
-        , button
-            [ type_ "button"
-            , class "option-copy-button"
-            , title "Copy option name"
-            , onClick (CopyOptionName optionName)
-            ]
-            [ text "Copy" ]
+        , Utils.copyButton CopyToClipboard "option-copy-button" "Copy option name" optionName
         ]
 
 

@@ -25,6 +25,7 @@ import Html
     exposing
         ( Html
         , a
+        , button
         , code
         , div
         , em
@@ -44,6 +45,7 @@ import Html.Attributes
         , href
         , id
         , target
+        , title
         )
 import Html.Events exposing (onClick)
 import Http exposing (Body)
@@ -51,6 +53,7 @@ import Json.Decode
 import Json.Decode.Pipeline
 import Json.Encode
 import List.Extra
+import Ports
 import Regex
 import Route exposing (SearchType)
 import Search
@@ -237,6 +240,7 @@ platforms =
 
 type Msg
     = SearchMsg (Search.Msg ResultItemSource ResultAggregations)
+    | CopyToClipboard String
 
 
 update :
@@ -258,6 +262,9 @@ update navKey msg model nixosChannels =
                         nixosChannels
             in
             ( newModel, Cmd.map SearchMsg newCmd )
+
+        CopyToClipboard text_ ->
+            ( model, Ports.copyToClipboard text_ )
 
 
 
@@ -350,6 +357,16 @@ viewSuccess nixosChannels channel showInstallDetails show hits =
         )
 
 
+{-| Render an install command or configuration snippet together with a
+button that copies its plain-text form to the clipboard. The package name
+inside the snippet is rendered in bold, so the exact text to copy is passed
+separately from the displayed content.
+-}
+copyableCommand : String -> String -> List (Html Msg) -> Html Msg
+copyableCommand preClass commandText content =
+    Utils.copyable CopyToClipboard commandText (pre [ class preClass ] content)
+
+
 viewResultItem :
     List NixOSChannel
     -> String
@@ -403,18 +420,20 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                             ]
                             ++ optionals (List.length item.source.outputs > 1)
                                 [ li []
-                                    (text "Outputs: "
-                                        :: (item.source.default_output
-                                                |> Maybe.map (\d -> [ strong [] [ code [] [ text d ] ], text " " ])
-                                                |> Maybe.withDefault []
-                                           )
-                                        ++ (item.source.outputs
-                                                |> List.filter (\o -> Just o /= item.source.default_output)
-                                                |> List.sort
-                                                |> List.map (\o -> code [] [ text o ])
-                                                |> List.intersperse (text " ")
-                                           )
-                                    )
+                                    [ text "Outputs: "
+                                    , inlineListCode
+                                        ((item.source.default_output
+                                            |> Maybe.map (\d -> strong [] [ text d ])
+                                            |> Maybe.map List.singleton
+                                            |> Maybe.withDefault []
+                                         )
+                                            ++ (item.source.outputs
+                                                    |> List.filter (\o -> Just o /= item.source.default_output)
+                                                    |> List.sort
+                                                    |> List.map (\o -> text o)
+                                               )
+                                        )
+                                    ]
                                 ]
                             ++ (item.source.homepage
                                     |> List.head
@@ -455,9 +474,9 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                         in
                                         optionals (not (List.isEmpty licenses))
                                             [ li []
-                                                (text "License: "
-                                                    :: List.intersperse (text " ▪ ") licenses
-                                                )
+                                                [ text "License: "
+                                                , inlineListCode licenses
+                                                ]
                                             ]
                                )
                        )
@@ -465,19 +484,32 @@ viewResultItem nixosChannels channel showInstallDetails show item =
 
         showMaintainer maintainer =
             let
-                nameLink : Html msg
-                nameLink =
+                githubHandle =
+                    Maybe.map (String.append "@") maintainer.github
+
+                name =
+                    Maybe.withDefault (Maybe.withDefault "Unknown" maintainer.github) maintainer.name
+
+                nameHtml =
                     case maintainer.github of
                         Just github ->
-                            a
-                                [ href ("https://github.com/" ++ github) ]
-                                [ text (Maybe.withDefault github maintainer.name) ]
+                            a [ href ("https://github.com/" ++ github) ] [ text name ]
 
                         Nothing ->
-                            text (Maybe.withDefault "Unknown" maintainer.name)
+                            text name
 
-                emailLink : List (Html msg)
-                emailLink =
+                githubHtml =
+                    case githubHandle of
+                        Just handle ->
+                            [ text " ("
+                            , code [] [ text handle ]
+                            , text ")"
+                            ]
+
+                        Nothing ->
+                            []
+
+                emailHtml =
                     case maintainer.email of
                         Just email ->
                             [ text " <"
@@ -487,8 +519,16 @@ viewResultItem nixosChannels channel showInstallDetails show item =
 
                         Nothing ->
                             []
+
+                ( onClickAttr, _ ) =
+                    case githubHandle of
+                        Just handle ->
+                            ( [ onClick (CopyToClipboard handle) ], [] )
+
+                        Nothing ->
+                            ( [], [] )
             in
-            li [] (nameLink :: emailLink)
+            li (class "maintainer-list-item" :: onClickAttr) (nameHtml :: githubHtml ++ emailHtml)
 
         linkAllMaintainers maintainers =
             let
@@ -496,11 +536,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                     List.filterMap (\m -> Maybe.map (String.append "@") m.github) maintainers
             in
             optionals (not (List.isEmpty ghHandles))
-                [ li []
-                    [ text "Maintainer Github handles: "
-                    , code []
-                        [ text (String.join " " ghHandles) ]
-                    ]
+                [ li [ class "maintainer-list-item", onClick (CopyToClipboard (String.join " " ghHandles)) ]
+                    [ text "Copy all maintainers' GitHub handles" ]
                 ]
 
         showTeam team =
@@ -541,7 +578,7 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                     List.filterMap (\m -> m.email) maintainers
             in
             optionals (List.length maintainerMails > 1)
-                [ li []
+                [ li [ class "maintainer-list-item" ]
                     [ a
                         [ href ("mailto:" ++ String.join "," maintainerMails) ]
                         [ text "✉️ Mail to all maintainers" ]
@@ -601,31 +638,41 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                         Just mainProgram ->
                             p []
                                 [ p [] [ text "Only the main program of this package is known: " ]
-                                , code [] [ strong [] [ text mainProgram ] ]
+                                , withCopyableCode mainProgram (strong [] [ text mainProgram ])
                                 ]
 
                   else
-                    p []
-                        (List.intersperse (text " ")
-                            (List.map
-                                (\p ->
-                                    code []
-                                        [ case item.source.mainProgram of
-                                            Nothing ->
-                                                text p
+                    inlineListElementsCopyableCode
+                        identity
+                        (\p ->
+                            case item.source.mainProgram of
+                                Nothing ->
+                                    text p
 
-                                            Just mainProgram ->
-                                                if p == mainProgram then
-                                                    strong [] [ text p ]
+                                Just mainProgram ->
+                                    if p == mainProgram then
+                                        strong [] [ text p ]
 
-                                                else
-                                                    text p
-                                        ]
-                                )
-                                (List.sort item.source.programs)
-                            )
+                                    else
+                                        text p
                         )
+                        (List.sort item.source.programs)
                 ]
+
+        nixosOptions =
+            if item.source.flakeUrl == Nothing then
+                div []
+                    [ h4 [] [ text "NixOS options" ]
+                    , p []
+                        [ a [ href ("/options?channel=" ++ channel ++ "&query=" ++ item.source.attr_name) ]
+                            [ text "Search NixOS options for "
+                            , em [] [ text item.source.attr_name ]
+                            ]
+                        ]
+                    ]
+
+            else
+                text ""
 
         longerPackageDetails =
             optionals (Just item.source.attr_name == show)
@@ -667,7 +714,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                             , ( "active", True )
                                             ]
                                         ]
-                                        [ pre [ class "code-block shell-command" ]
+                                        [ copyableCommand "code-block shell-command"
+                                            ("nix profile add " ++ flakeUrl ++ "#" ++ item.source.attr_name)
                                             [ text "nix profile add "
                                             , strong [] [ text flakeUrl ]
                                             , text "#"
@@ -783,7 +831,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                         , class "tab-pane"
                                         , id "package-details-nixpkgs"
                                         ]
-                                        [ pre [ class "code-block shell-command" ]
+                                        [ copyableCommand "code-block shell-command"
+                                            ("nix-env -iA nixos." ++ item.source.attr_name)
                                             [ text "nix-env -iA nixos."
                                             , strong [] [ text item.source.attr_name ]
                                             ]
@@ -805,7 +854,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                         , class "tab-pane"
                                         , id "package-details-nixpkgs"
                                         ]
-                                        [ pre [ class "code-block shell-command" ]
+                                        [ copyableCommand "code-block shell-command"
+                                            ("# without flakes:\nnix-env -iA nixpkgs." ++ item.source.attr_name ++ "\n# with flakes:\nnix profile add nixpkgs#" ++ item.source.attr_name)
                                             [ text "# without flakes:\nnix-env -iA nixpkgs."
                                             , strong [] [ text item.source.attr_name ]
                                             , text "\n# with flakes:\nnix profile add nixpkgs#"
@@ -830,7 +880,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                         , class "tab-pane"
                                         , id "package-details-nixpkgs"
                                         ]
-                                        [ pre [ class "code-block" ]
+                                        [ copyableCommand "code-block"
+                                            ("  environment.systemPackages = [\n    pkgs." ++ item.source.attr_name ++ "\n  ];")
                                             [ text <| "  environment.systemPackages = [\n    pkgs."
                                             , strong [] [ text item.source.attr_name ]
                                             , text <| "\n  ];"
@@ -858,7 +909,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                             , ( "active", List.member showInstallDetails [ Search.Unset, Search.ViaNixShell, Search.FromFlake ] )
                                             ]
                                         ]
-                                        [ pre [ class "code-block shell-command" ]
+                                        [ copyableCommand "code-block shell-command"
+                                            ("nix-shell -p " ++ item.source.attr_name)
                                             [ text "nix-shell -p "
                                             , strong [] [ text item.source.attr_name ]
                                             ]
@@ -870,7 +922,8 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                         , class "tab-pane"
                                         , id "package-details-nixpkgs"
                                         ]
-                                        [ pre [ class "code-block shell-command" ]
+                                        [ copyableCommand "code-block shell-command"
+                                            ("nix profile add nixpkgs#" ++ item.source.attr_name)
                                             [ text "nix profile add nixpkgs#"
                                             , strong [] [ text item.source.attr_name ]
                                             ]
@@ -879,6 +932,7 @@ viewResultItem nixosChannels channel showInstallDetails show item =
                                 ]
                     , programs
                     , maintainersTeamsAndPlatforms
+                    , nixosOptions
                     , if List.isEmpty item.source.modularServices then
                         text ""
 
@@ -958,6 +1012,55 @@ viewResultItem nixosChannels channel showInstallDetails show item =
          , Search.showMoreButton toggle isOpen
          ]
             ++ longerPackageDetails
+        )
+
+
+inlineListElements : List (Html msg) -> Html msg
+inlineListElements =
+    baseInlineList "inline-list-elements" identity
+
+
+inlineListElementsCode : List (Html msg) -> Html msg
+inlineListElementsCode =
+    baseInlineList "inline-list-elements" withCode
+
+
+inlineListElementsCopyableCode : (a -> String) -> (a -> Html Msg) -> List a -> Html Msg
+inlineListElementsCopyableCode toText toHtml items =
+    baseInlineList "inline-list-elements" (\i -> i) (List.map (\item -> withCopyableCode (toText item) (toHtml item)) items)
+
+
+inlineList : List (Html msg) -> Html msg
+inlineList =
+    baseInlineList "inline-list" identity
+
+
+inlineListCode : List (Html msg) -> Html msg
+inlineListCode =
+    baseInlineList "inline-list" withCode
+
+
+withCode : Html msg -> Html msg
+withCode i =
+    code [] [ i ]
+
+
+withCopyableCode : String -> Html Msg -> Html Msg
+withCopyableCode content html =
+    code
+        [ onClick (CopyToClipboard content)
+        , class "clickable-code"
+        , title "Click to copy"
+        ]
+        [ html ]
+
+
+baseInlineList : String -> (Html msg -> Html msg) -> List (Html msg) -> Html msg
+baseInlineList className wrapper items =
+    ul [ class className ]
+        (items
+            |> List.map (\i -> li [] [ wrapper i ])
+            |> List.intersperse (text " ")
         )
 
 

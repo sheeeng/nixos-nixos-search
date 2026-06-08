@@ -100,6 +100,14 @@
     padding: 4px;
   }
 
+  .clickable-code {
+    cursor: pointer;
+
+    &:hover {
+      background-color: var(--search-sidebar-hovered-link-background);
+    }
+  }
+
   pre {
     color: var(--text-color);
   }
@@ -577,6 +585,13 @@ header .navbar.navbar-static-top ul.nav > li.external {
      & > h2 {
        margin-top: 0;
      }
+
+     // Nudge toward the other search (packages vs options) when a query
+     // comes up empty -- the two tabs are easy to confuse.
+     & > .search-cross-hint {
+       margin: 0.5em 0;
+       font-size: 1.1em;
+     }
   }
 
 
@@ -859,12 +874,12 @@ header .navbar.navbar-static-top ul.nav > li.external {
                 display: grid;
                 grid-template-columns: auto auto;
 
-                // make it easy to copy only the list of Github handles
-                & > :first-child > ul > :last-child {
-                  user-select: none;
-                }
-                & > :first-child > ul > :last-child > code {
-                  user-select: text;
+                .maintainer-list-item {
+                  cursor: pointer;
+
+                  &:hover {
+                    background-color: var(--search-sidebar-hovered-link-background);
+                  }
                 }
               }
             }
@@ -1114,11 +1129,9 @@ a:focus-visible {
   }
 }
 
-.option-copy-button {
+%copy-button-base {
   position: absolute;
-  top: 50%;
   right: 0.4em;
-  transform: translateY(-50%);
   padding: 0.3em 0.7em;
   border-radius: 4px;
   font-size: 0.85em;
@@ -1132,6 +1145,73 @@ a:focus-visible {
   &:hover {
     color: var(--text-color);
     background: var(--hover-background, rgba(0, 0, 0, 0.05));
+  }
+}
+
+.option-copy-button {
+  @extend %copy-button-base;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+// Each install command / configuration snippet in the package details hosts
+// a copy button pinned to its top-right corner. The wrapper is the
+// positioning context so the button overlays the code without shifting it.
+// Pinned to the top (rather than centred) since some snippets span multiple
+// lines.
+.code-block-wrapper {
+  position: relative;
+
+  // Keep the text clear of the button. The block is a bare <pre> for package
+  // commands but a nested <pre> for option values, so match either.
+  & pre {
+    padding-right: 4em;
+  }
+}
+
+.code-copy-button {
+  @extend %copy-button-base;
+  top: 0.4em;
+}
+
+.copy-toast {
+  position: fixed;
+  bottom: 1.5em;
+  left: 50%;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  max-width: calc(100vw - 2em);
+  padding: 0.5em 0.9em;
+  border-radius: 6px;
+  border: 1px solid var(--search-sidebar-container-border-color, #ccc);
+  background: var(--background-color, #fff);
+  color: var(--text-color, #333);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+  font-size: 0.9em;
+
+  opacity: 0;
+  transform: translate(-50%, 0.6em);
+  pointer-events: none;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+
+  &::before {
+    content: "✓";
+    font-weight: bold;
+  }
+
+  &.visible {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copy-toast {
+    transition: none;
   }
 }
 
@@ -1163,4 +1243,16 @@ a:focus-visible {
   font-weight: bold;
   font-size: 0.85em;
   opacity: 0.75;
+}
+
+ul.inline-list-elements {
+  margin: 0;
+  li {
+    display: inline;
+  }
+}
+
+ul.inline-list {
+  @extend .inline-list-elements;
+  display: inline;
 }
