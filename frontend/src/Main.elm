@@ -1,22 +1,20 @@
-port module Main exposing (Flags, Model, Msg, Page, main)
+port module Main exposing (Flags, Model, Msg, Page, Theme, main)
 
 import Browser
 import Browser.Dom
 import Browser.Navigation
+import Components.Button exposing (viewButton)
 import Dict
 import Html
     exposing
         ( Html
         , a
-        , button
         , div
         , footer
         , header
         , img
         , li
-        , small
         , span
-        , sup
         , text
         , ul
         )
@@ -619,9 +617,8 @@ viewThemeSelector currentTheme =
         ]
         (List.map
             (\t ->
-                button
-                    [ class "btn"
-                    , classList [ ( "active", t == currentTheme ) ]
+                viewButton
+                    [ classList [ ( "active", t == currentTheme ) ]
                     , title (themeLabel t)
                     , attribute "aria-label" (themeLabel t)
                     , attribute "aria-pressed"

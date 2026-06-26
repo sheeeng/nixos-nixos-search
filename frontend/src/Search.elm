@@ -39,12 +39,13 @@ import Array
 import Base64
 import Browser.Dom
 import Browser.Navigation
+import Components.Badge as Badge
+import Components.Button exposing (viewButton)
 import Dict exposing (Dict)
 import Html
     exposing
         ( Html
         , a
-        , button
         , code
         , div
         , form
@@ -198,18 +199,16 @@ channelBadge : NixOSChannelStatus -> List (Html msg)
 channelBadge status =
     case status of
         Rolling ->
-            -- [ span [ class "label label-success" ] [ text "Rolling" ] ]
             []
 
         Beta ->
-            [ span [ class "label label-info" ] [ text "Beta" ] ]
+            [ Badge.view Badge.Beta ]
 
         Stable ->
-            -- [ span [ class "label label-success" ] [ text "Stable" ] ]
             []
 
         Deprecated ->
-            [ span [ class "label label-warning" ] [ text "Deprecated" ] ]
+            [ Badge.view Badge.Deprecated ]
 
 
 decodeNixOSChannels : Json.Decode.Decoder NixOSChannels
@@ -555,9 +554,6 @@ update toRoute navKey msg model nixosChannels =
 
         QueryResponse result ->
             let
-                activeSourceId =
-                    Route.optionSourceId model.activeOptionSource
-
                 -- Mirror the active tab's count into the per-source dict
                 -- so tabs read uniformly from one place. Pages that don't
                 -- use option-source tabs (Packages, Flakes) just write
@@ -565,6 +561,10 @@ update toRoute navKey msg model nixosChannels =
                 updatedCounts =
                     case result of
                         RemoteData.Success r ->
+                            let
+                                activeSourceId =
+                                    Route.optionSourceId model.activeOptionSource
+                            in
                             Dict.insert
                                 activeSourceId
                                 r.hits.total.value
@@ -1045,10 +1045,6 @@ viewNoResults categoryName activeOptionSource query channel =
             Html.a [ href ("https://github.com/NixOS/nixpkgs/issues?q=" ++ query) ]
                 [ text "search nixpkgs issues" ]
 
-        homeManagerIssues =
-            Html.a [ href ("https://github.com/nix-community/home-manager/issues?q=" ++ query) ]
-                [ text "search home-manager issues" ]
-
         body =
             if categoryName == "packages" then
                 [ text "You might want to "
@@ -1066,6 +1062,11 @@ viewNoResults categoryName activeOptionSource query channel =
                 ]
 
             else if activeOptionSource == Route.HomeManagerOptionSource then
+                let
+                    homeManagerIssues =
+                        Html.a [ href ("https://github.com/nix-community/home-manager/issues?q=" ++ query) ]
+                            [ text "search home-manager issues" ]
+                in
                 [ text "You might want to ", homeManagerIssues, text "." ]
 
             else
@@ -1194,7 +1195,7 @@ viewSearchInput nixosChannels outMsg categoryName selectedChannel searchQuery =
                     ]
                     []
                 ]
-            , button [ class "btn", type_ "submit" ]
+            , viewButton [ type_ "submit" ]
                 [ text "Search" ]
             ]
             :: (selectedChannel
@@ -1219,11 +1220,10 @@ viewChannels nixosChannels outMsg selectedChannel =
                 ]
                 (List.map
                     (\channel ->
-                        button
+                        viewButton
                             [ type_ "button"
                             , classList
-                                [ ( "btn", True )
-                                , ( "active", channel.id == selectedChannel )
+                                [ ( "active", channel.id == selectedChannel )
                                 ]
                             , onClick <| outMsg (ChannelChange channel.id)
                             ]
@@ -1339,10 +1339,8 @@ viewSortSelection model =
             ]
         , onClickStop NoOp
         ]
-        [ button
-            [ class "btn"
-            , onClick ToggleSort
-            ]
+        [ viewButton
+            [ onClick ToggleSort ]
             [ span [] [ text <| "Sort: " ]
             , span [ class "selected" ] [ text <| toSortTitle model.sort ]
             , span [ class "caret" ] []
@@ -1382,9 +1380,8 @@ viewPager model total =
     div []
         [ ul [ class "pager" ]
             [ li []
-                [ button
-                    [ class "btn"
-                    , disabled (model.from == 0)
+                [ viewButton
+                    [ disabled (model.from == 0)
                     , onClick <|
                         if model.from == 0 then
                             NoOp
@@ -1395,9 +1392,8 @@ viewPager model total =
                     [ text "First" ]
                 ]
             , li []
-                [ button
-                    [ class "btn"
-                    , disabled (model.from == 0)
+                [ viewButton
+                    [ disabled (model.from == 0)
                     , onClick <|
                         if model.from - model.size < 0 then
                             NoOp
@@ -1408,9 +1404,8 @@ viewPager model total =
                     [ text "Previous" ]
                 ]
             , li []
-                [ button
-                    [ class "btn"
-                    , disabled (model.from + model.size >= total)
+                [ viewButton
+                    [ disabled (model.from + model.size >= total)
                     , onClick <|
                         if model.from + model.size >= total then
                             NoOp
@@ -1421,9 +1416,8 @@ viewPager model total =
                     [ text "Next" ]
                 ]
             , li []
-                [ button
-                    [ class "btn"
-                    , disabled (model.from + model.size >= total)
+                [ viewButton
+                    [ disabled (model.from + model.size >= total)
                     , onClick <|
                         if model.from + model.size >= total then
                             NoOp

@@ -1,9 +1,7 @@
-"use strict";
+import "./scss/index.scss";
 
-require("./index.scss");
-require("elm-keyboard-shortcut");
-
-const { Elm } = require("./Main");
+import "elm-keyboard-shortcut";
+import { Elm } from "./Main";
 
 function normalizeTheme(value) {
     return value === "light" || value === "dark" ? value : "auto";
