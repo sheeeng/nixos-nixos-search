@@ -37,6 +37,11 @@ pub fn run_garbage_collection() -> Result<()> {
     Ok(())
 }
 
+pub fn add_flake_arg(command: &mut Command, name: &str, flake_ref: &str) {
+    let expr = format!("builtins.getFlake \"{}\"", flake_ref);
+    command.add_args(["--arg", name, &expr].iter());
+}
+
 pub fn nix_eval_command(args: &[&str]) -> Command {
     let mut command = Command::with_args("nix", args.iter());
     command.add_arg_pair("-f", EXTRACT_SCRIPT.clone());

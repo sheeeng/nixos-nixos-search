@@ -26,6 +26,9 @@
   /* When search results are expanded, they show tabbed help for installing the result. This is the border color for that tabbed thing.
        It is only half of the border, the other half is styled by bootstrap. */
   --search-result-expanded-tab-border: #ccc;
+
+  --line-color: #ccc;
+
   /* Color of the animation above the `Loading` text that is shown when searching */
   --loader-color: #000;
   /* Background color of the experimental badge next to the flakes search */
@@ -349,20 +352,13 @@ footer {
 
   // Search section title title
   & > h1 {
+    display: flex;
+    gap: .5ch; // 1 space = ~1/2 '0'
     font-weight: normal;
     font-size: 2.3em;
 
-    &:before {
-      content: "\2315";
-      display: inline-block;
-      font-size: 2em;
-      margin-right: 0.2em;
-      -moz-transform: scale(-1, 1);
-      -webkit-transform: scale(-1, 1);
-      -o-transform: scale(-1, 1);
-      -ms-transform: scale(-1, 1);
-      transform: translateY(0.15em) scaleX(-1);
-      font-family: monospace;
+    svg {
+      fill: currentColor;
     }
   }
 
@@ -468,6 +464,10 @@ footer {
     }
   }
 
+  .loader-wrapper .search-sidebar {
+    visibility: hidden;
+  }
+
   // Buckets
   .search-sidebar {
     margin: 0 1em 0 0;
@@ -495,7 +495,7 @@ footer {
         display: grid;
         grid-template-columns: auto max-content;
         color: var(--search-sidebar-link-color);
-        padding: 0.5em 0.5em 0.5em 1em;
+        padding: 0.5em 1em;
         border-radius: 4px;
         white-space: nowrap;
         margin-bottom: 0.2em;
@@ -1134,6 +1134,7 @@ ul.inline-list {
 }
 
 sort-select-wrapper select {
+  color: var(--text-color);
   outline: none;
 }
 
@@ -1164,6 +1165,7 @@ sort-select-wrapper select {
     }
   }
 }
+
 
 .sort-select::picker(select) {
   appearance: base-select;

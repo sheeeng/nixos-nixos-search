@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
+use command_run::{Command, LogTo};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-
-use command_run::{Command, LogTo};
 
 use crate::Source;
 use crate::data::Nixpkgs;
@@ -127,7 +126,7 @@ fn resolve_repology_counts(file: &Option<PathBuf>) -> HashMap<String, u64> {
 
 pub fn get_nixpkgs_package_services(nixpkgs: &Source) -> Result<HashMap<String, Vec<String>>> {
     let mut command = super::nix_eval_command(&["eval", "--json", "--no-write-lock-file"]);
-    command.add_args(["--override-flake", "nixpkgs", &nixpkgs.to_flake_ref()].iter());
+    super::add_flake_arg(&mut command, "nixpkgsFlake", &nixpkgs.to_flake_ref());
     command.add_arg("nixos-package-services");
 
     let cow = command
@@ -142,16 +141,16 @@ pub fn get_nixpkgs_package_services(nixpkgs: &Source) -> Result<HashMap<String, 
 }
 
 pub fn get_nixpkgs_programs(nixpkgs: &Nixpkgs) -> Result<HashMap<String, HashSet<String>>> {
-    let mut command = Command::new("nix-instantiate");
+    let mut command = Command::with_args(
+        "nix",
+        &["eval", "--raw", "--impure", "--no-write-lock-file"],
+    );
     command.add_args(&[
-        "--eval",
-        "--json",
         "-I",
         format!("nixpkgs=channel:nixos-{}", nixpkgs.channel).as_str(),
         "--expr",
         "toString <nixpkgs/programs.sqlite>",
     ]);
-
     command.enable_capture();
     command.log_to = LogTo::Log;
     command.log_output_on_error = true;
@@ -160,8 +159,8 @@ pub fn get_nixpkgs_programs(nixpkgs: &Nixpkgs) -> Result<HashMap<String, HashSet
         .run()
         .with_context(|| "Failed to gather information about nixpkgs programs")?;
 
-    let output = &*cow.stdout_string_lossy();
-    let programs_db: &str = serde_json::from_str(output)?;
+    let output = cow.stdout_string_lossy();
+    let programs_db = output.trim();
     let conn = sqlite::open(programs_db)?;
     let cur = conn
         .prepare("SELECT name, package FROM Programs")?
@@ -183,12 +182,12 @@ pub fn get_nixpkgs_programs(nixpkgs: &Nixpkgs) -> Result<HashMap<String, HashSet
 fn get_options_from_script(
     nixpkgs: &Source,
     attribute: &str,
-    override_flake: Option<(&str, &str)>,
+    target_flake: Option<&str>,
 ) -> Result<Vec<NixOption>> {
     let mut command = super::nix_eval_command(&["eval", "--json", "--no-write-lock-file"]);
-    command.add_args(["--override-flake", "nixpkgs", &nixpkgs.to_flake_ref()].iter());
-    if let Some((name, flake_ref)) = override_flake {
-        command.add_args(["--override-flake", name, flake_ref].iter());
+    super::add_flake_arg(&mut command, "nixpkgsFlake", &nixpkgs.to_flake_ref());
+    if let Some(flake_ref) = target_flake {
+        super::add_flake_arg(&mut command, "targetFlake", flake_ref);
     }
     command.add_arg(attribute);
 
@@ -236,11 +235,7 @@ fn home_manager_flake_ref(nixpkgs: &Source) -> String {
 
 pub fn get_home_manager_options(nixpkgs: &Source) -> Result<Vec<NixpkgsEntry>> {
     let hm_flake_ref = home_manager_flake_ref(nixpkgs);
-    let options = get_options_from_script(
-        nixpkgs,
-        "home-manager-options",
-        Some(("input-flake", &hm_flake_ref)),
-    )?;
+    let options = get_options_from_script(nixpkgs, "home-manager-options", Some(&hm_flake_ref))?;
     Ok(options
         .into_iter()
         .map(NixpkgsEntry::HomeManagerOption)
@@ -260,11 +255,7 @@ fn darwin_flake_ref(nixpkgs: &Source) -> String {
 
 pub fn get_darwin_options(nixpkgs: &Source) -> Result<Vec<NixpkgsEntry>> {
     let darwin_flake_ref = darwin_flake_ref(nixpkgs);
-    let options = get_options_from_script(
-        nixpkgs,
-        "darwin-options",
-        Some(("input-flake", &darwin_flake_ref)),
-    )?;
+    let options = get_options_from_script(nixpkgs, "darwin-options", Some(&darwin_flake_ref))?;
     Ok(options
         .into_iter()
         .map(NixpkgsEntry::DarwinOption)
@@ -314,6 +305,20 @@ mod tests {
         assert_eq!(
             info.packages["SP800-90B_EntropyAssessment"].pname,
             "SP800-90B_EntropyAssessment",
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_get_nixpkgs_programs() {
+        let nixpkgs = Nixpkgs {
+            channel: "unstable".into(),
+            git_ref: "".into(),
+        };
+        let programs = get_nixpkgs_programs(&nixpkgs).expect("get_nixpkgs_programs failed");
+        assert!(
+            !programs.is_empty(),
+            "programs database should not be empty"
         );
     }
 }
