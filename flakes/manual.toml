@@ -601,6 +601,11 @@ repo = "kconfq"
 
 [[sources]]
 type = "github"
+owner = "tomodachi94"
+repo = "dotfiles"
+
+[[sources]]
+type = "github"
 owner = "TraceMachina"
 repo = "nativelink"
 
@@ -623,6 +628,11 @@ repo = "bazel-nix"
 type = "github"
 owner = "Wazzaps"
 repo = "fingerpaint"
+
+[[sources]]
+type = "github"
+owner = "Wyze3306"
+repo = "BedrockOnLinux"
 
 [[sources]]
 type = "github"
