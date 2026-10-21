@@ -82,6 +82,11 @@ type = "github"
 owner = "anpandey"
 repo = "numen-nix"
 
+[[source]]
+type = "github"
+owner = "Ap6661"
+repo = "septabee-flake"
+
 [[sources]]
 type = "github"
 owner = "astro"
@@ -91,6 +96,11 @@ repo = "deadnix"
 type = "github"
 owner = "atuinsh"
 repo = "atuin"
+
+[[sources]]
+type = "github"
+owner = "bitcoinix"
+repo = "bitcoinix"
 
 [[sources]]
 type = "github"
@@ -232,15 +242,15 @@ type = "github"
 owner = "edolstra"
 repo = "flake-compat"
 
+[[source]]
+type = "github"
+owner = "JuxGD"
+repo = "septabee-nix"
+
 [[sources]]
 type = "github"
 owner = "eza-community"
 repo = "eza"
-
-[[sources]]
-type = "github"
-owner = "fort-nix"
-repo = "nix-bitcoin"
 
 [[sources]]
 type = "github"
