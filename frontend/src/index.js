@@ -18,6 +18,8 @@ function applyTheme(theme) {
 const initialTheme = normalizeTheme(localStorage.getItem("theme"));
 applyTheme(initialTheme);
 
+const systemDarkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
 const connection = navigator.connection || navigator.webkitConnection;
 const saveDataAttr = document.documentElement.dataset.saveData === "on";
 const saveData =
@@ -37,6 +39,7 @@ const app = Elm.Main.init({
             process.env.ELASTICSEARCH_PASSWORD || "X8gPHnzL52wFEekuxsfQ9cSh",
         nixosChannels: JSON.parse(process.env.NIXOS_CHANNELS),
         theme: initialTheme,
+        systemDark: systemDarkQuery.matches,
         isPrideMonth: new Date().getMonth() === 5,
         saveData: Boolean(saveData),
     },
@@ -46,9 +49,19 @@ if (app.ports && app.ports.setTheme) {
     app.ports.setTheme.subscribe((value) => {
         const theme = normalizeTheme(value);
         try {
-            localStorage.setItem("theme", theme);
+            if (theme === "auto") {
+                localStorage.removeItem("theme");
+            } else {
+                localStorage.setItem("theme", theme);
+            }
         } catch (_) {}
         applyTheme(theme);
+    });
+}
+
+if (app.ports && app.ports.systemDarkChanged) {
+    systemDarkQuery.addEventListener("change", (e) => {
+        app.ports.systemDarkChanged.send(e.matches);
     });
 }
 
@@ -80,6 +93,37 @@ if (app.ports && app.ports.copyToClipboard) {
             .writeText(text)
             .then(() => showCopyToast("Copied to clipboard"))
             .catch(() => {});
+    });
+}
+
+if (app.ports && app.ports.scrollRow) {
+    app.ports.scrollRow.subscribe(({ id, direction }) => {
+        const element = document.getElementById(id);
+        if (!element) return;
+        // The row goes around: at the last screenshots, the next step goes
+        // to the first, and at the first, the previous step goes to the last.
+        // A tolerance of 1px covers fractional scroll positions.
+        const end = element.scrollWidth - element.clientWidth;
+        if (direction > 0 && element.scrollLeft >= end - 1) {
+            element.scrollTo({ left: 0 });
+        } else if (direction < 0 && element.scrollLeft <= 1) {
+            element.scrollTo({ left: end });
+        } else {
+            // `scrollBy` keeps the `scroll-behavior` of the element. A step
+            // of less than the full width keeps the item at the edge in view.
+            element.scrollBy({ left: direction * element.clientWidth * 0.8 });
+        }
+    });
+}
+
+if (app.ports && app.ports.showModal) {
+    app.ports.showModal.subscribe((id) => {
+        // Elm writes the dialog on the next animation frame, thus this frame
+        // comes after it.
+        requestAnimationFrame(() => {
+            const dialog = document.getElementById(id);
+            if (dialog && !dialog.open) dialog.showModal();
+        });
     });
 }
 

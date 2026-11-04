@@ -23,7 +23,6 @@ module Search exposing
     , init
     , makeRequest
     , makeRequestTask
-    , onClickStop
     , shouldLoad
     , showMoreButton
     , trapClick
@@ -101,7 +100,7 @@ import Route
         , searchTypeToTitle
         )
 import Search.Typeahead as Typeahead
-import Svg exposing (Svg, path, rect, svg)
+import Svg exposing (path, rect, svg)
 import Svg.Attributes as SA
 import Task
 
@@ -134,6 +133,14 @@ type alias Model a b =
     -- flashing the full loader. Cleared once the new response lands.
     , previousResult : Maybe (SearchResult a b)
     , options : Options
+
+    -- Whether the visitor asked for less data, via `Save-Data` or a connection
+    -- the browser reports as metered. Results skip images under it.
+    , saveData : Bool
+
+    -- The screenshot that the package page shows in its lightbox: the id of
+    -- the result and the index of the screenshot in that result.
+    , screenshotShown : Maybe ( String, Int )
     , typeahead : Typeahead.Model
     }
 
@@ -360,6 +367,8 @@ init options preferStatic args defaultNixOSChannel nixosChannels maybeModel =
       , previousResult = Nothing
       , urlChannel = args.channel
       , options = options
+      , saveData = not preferStatic
+      , screenshotShown = Nothing
       , typeahead = Typeahead.init preferStatic
       }
         |> ensureLoading nixosChannels
@@ -454,7 +463,6 @@ type Details
     | ViaNixOS
     | ViaNixProfile
     | ViaNixEnv
-    | FromFlake
     | Unset
 
 
@@ -536,9 +544,7 @@ update toRoute navKey msg model nixosChannels =
         QueryInput query ->
             let
                 ( typeaheadModel, typeaheadCmd ) =
-                    Typeahead.queryChanged model.options
-                        nixosChannels
-                        model.searchType
+                    Typeahead.queryChanged model.searchType
                         model.activeOptionSource
                         model.channel
                         query
@@ -567,12 +573,8 @@ update toRoute navKey msg model nixosChannels =
                 updatedCounts =
                     case result of
                         RemoteData.Success r ->
-                            let
-                                activeSourceId =
-                                    Route.optionSourceId model.activeOptionSource
-                            in
                             Dict.insert
-                                activeSourceId
+                                (Route.optionSourceId model.activeOptionSource)
                                 r.hits.total.value
                                 model.sourceCounts
 
@@ -931,8 +933,7 @@ viewResult nixosChannels outMsg categoryName model viewSuccess viewBuckets searc
             in
             if result.hits.total.value == 0 && List.isEmpty buckets then
                 div [ class "search-results" ]
-                    [ aside [ class "search-sidebar" ] searchBuckets
-                    , viewNoResults categoryName model.activeOptionSource model.query model.channel
+                    [ viewNoResults categoryName model.activeOptionSource model.query model.channel
                     ]
 
             else
@@ -1081,7 +1082,18 @@ viewBucket :
     -> List String
     -> List (Html a)
     -> List (Html a)
-viewBucket inputType title buckets searchMsgFor selectedBucket sets =
+viewBucket inputType title buckets_ searchMsgFor selectedBucket sets =
+    let
+        -- The other facets filter the counts of this facet. A selected value
+        -- can thus fall out of the top values or go to zero. Keep it, so that
+        -- the user can clear it.
+        buckets =
+            buckets_
+                ++ (selectedBucket
+                        |> List.filter (\key -> not (List.any (\bucket -> bucket.key == key) buckets_))
+                        |> List.map (\key -> { key = key, doc_count = 0 })
+                   )
+    in
     List.append
         sets
         (if List.isEmpty buckets then
@@ -1091,41 +1103,52 @@ viewBucket inputType title buckets searchMsgFor selectedBucket sets =
             [ fieldset [ class "search-bucket" ]
                 (legend [ class "header" ] [ text title ]
                     :: List.map
-                        (\bucket ->
-                            let
-                                isSelected =
-                                    List.member bucket.key selectedBucket
-
-                                inputTypeName =
-                                    case inputType of
-                                        CheckboxInput ->
-                                            "checkbox"
-
-                                        RadioInput ->
-                                            "radio"
-                            in
-                            label
-                                [ classList [ ( "selected", isSelected ) ]
-                                ]
-                                [ span [ class "bucket-label" ] [ text bucket.key ]
-                                , if isSelected || bucket.doc_count <= 0 then
-                                    closeButton
-
-                                  else
-                                    span [ class "bucket-count" ] [ span [ class "badge" ] [ text <| String.fromInt bucket.doc_count ] ]
-                                , input
-                                    [ type_ inputTypeName
-                                    , name title
-                                    , checked isSelected
-                                    , onClick <| searchMsgFor bucket.key
-                                    ]
-                                    []
-                                ]
-                        )
+                        (viewBucketItem inputType title searchMsgFor selectedBucket)
                         buckets
                 )
             ]
         )
+
+
+viewBucketItem :
+    BucketInputType
+    -> String
+    -> (String -> a)
+    -> List String
+    -> AggregationsBucketItem
+    -> Html a
+viewBucketItem inputType title searchMsgFor selectedBucket bucket =
+    let
+        isSelected : Bool
+        isSelected =
+            List.member bucket.key selectedBucket
+
+        inputTypeName : String
+        inputTypeName =
+            case inputType of
+                CheckboxInput ->
+                    "checkbox"
+
+                RadioInput ->
+                    "radio"
+    in
+    label
+        [ classList [ ( "selected", isSelected ) ]
+        ]
+        [ span [ class "bucket-label" ] [ text bucket.key ]
+        , if isSelected || bucket.doc_count <= 0 then
+            closeButton
+
+          else
+            span [ class "bucket-count" ] [ span [ class "badge" ] [ text <| String.fromInt bucket.doc_count ] ]
+        , input
+            [ type_ inputTypeName
+            , name title
+            , checked isSelected
+            , onClick <| searchMsgFor bucket.key
+            ]
+            []
+        ]
 
 
 viewSearchInput :
@@ -1158,14 +1181,7 @@ viewSearchInput nixosChannels outMsg categoryName selectedChannel searchQuery ma
                     , onBlur (outMsg TypeaheadBlur)
                     , on "keydown"
                         (Json.Decode.field "key" Json.Decode.string
-                            |> Json.Decode.andThen
-                                (\key ->
-                                    if key == "Escape" then
-                                        Json.Decode.succeed (outMsg (TypeaheadMsg Typeahead.hide))
-
-                                    else
-                                        Json.Decode.fail "not Escape"
-                                )
+                            |> Json.Decode.andThen (hideTypeaheadOnEscape outMsg)
                         )
                     , value searchQuery
                     ]
@@ -1190,6 +1206,15 @@ viewSearchInput nixosChannels outMsg categoryName selectedChannel searchQuery ma
         ]
 
 
+hideTypeaheadOnEscape : (Msg a b -> c) -> String -> Json.Decode.Decoder c
+hideTypeaheadOnEscape outMsg key =
+    if key == "Escape" then
+        Json.Decode.succeed (outMsg (TypeaheadMsg Typeahead.hide))
+
+    else
+        Json.Decode.fail "not Escape"
+
+
 viewChannels :
     List NixOSChannel
     -> (Msg a b -> c)
@@ -1205,24 +1230,7 @@ viewChannels nixosChannels outMsg selectedChannel =
                 [ class "radio-group-segmented channel-radios" ]
                 (legend [ class "channel-title" ] [ text "Channels:" ]
                     :: List.map
-                        (\channel ->
-                            label
-                                [ classList
-                                    [ ( "btn", True )
-                                    , ( "channel-radio", True )
-                                    , ( "active", channel.id == selectedChannel )
-                                    ]
-                                ]
-                                [ text channel.id
-                                , input
-                                    [ type_ "radio"
-                                    , name "channel"
-                                    , checked (channel.id == selectedChannel)
-                                    , onClick <| outMsg (ChannelChange channel.id)
-                                    ]
-                                    []
-                                ]
-                        )
+                        (viewChannelRadio outMsg selectedChannel)
                         nixosChannels
                 )
             ]
@@ -1236,6 +1244,26 @@ viewChannels nixosChannels outMsg selectedChannel =
                     ]
                 ]
             )
+
+
+viewChannelRadio : (Msg a b -> c) -> String -> NixOSChannel -> Html c
+viewChannelRadio outMsg selectedChannel channel =
+    label
+        [ classList
+            [ ( "btn", True )
+            , ( "channel-radio", True )
+            , ( "active", channel.id == selectedChannel )
+            ]
+        ]
+        [ text channel.id
+        , input
+            [ type_ "radio"
+            , name "channel"
+            , checked (channel.id == selectedChannel)
+            , onClick <| outMsg (ChannelChange channel.id)
+            ]
+            []
+        ]
 
 
 viewResults :
@@ -1277,10 +1305,7 @@ viewResults nixosChannels model result viewSuccess outMsg categoryName =
                 , text " of "
                 ]
                 (if result.hits.total.value == 10000 then
-                    [ text "more than 10000."
-                    , p [ class "search-refine-hint" ]
-                        [ text "Please provide more precise search terms." ]
-                    ]
+                    [ text "more than 10000." ]
 
                  else
                     let
@@ -1296,30 +1321,41 @@ viewResults nixosChannels model result viewSuccess outMsg categoryName =
                     ]
                 )
             )
-        , p []
-            (case List.head result.hits.hits of
-                Nothing ->
-                    []
+        , if result.hits.total.value == 10000 then
+            p [ class "search-refine-hint" ]
+                [ text "Please provide more precise search terms." ]
 
-                Just elem ->
-                    case Array.get 3 (Array.fromList (String.split "-" elem.index)) of
-                        Nothing ->
-                            []
-
-                        Just commit ->
-                            let
-                                repoUrl =
-                                    Route.optionSourceRepoUrl model.activeOptionSource
-                            in
-                            [ text "Data from "
-                            , a [ href (repoUrl ++ "/tree/" ++ commit) ]
-                                [ code [] [ text (String.slice 0 8 commit) ] ]
-                            ]
-            )
+          else
+            -- this is an ugly hack for type correctness
+            span [] []
+        , p [] (viewDataSource model.activeOptionSource result.hits.hits)
         ]
     , viewSuccess nixosChannels model.channel model.showUsageDetails model.show result.hits.hits
     , Html.map outMsg <| viewPager model result.hits.total.value
     ]
+
+
+viewDataSource : Route.OptionSource -> List (ResultItem a) -> List (Html c)
+viewDataSource activeOptionSource hits =
+    case List.head hits of
+        Nothing ->
+            []
+
+        Just elem ->
+            case Array.get 3 (Array.fromList (String.split "-" elem.index)) of
+                Nothing ->
+                    []
+
+                Just commit ->
+                    let
+                        repoUrl : String
+                        repoUrl =
+                            Route.optionSourceRepoUrl activeOptionSource
+                    in
+                    [ text "Data from "
+                    , a [ href (repoUrl ++ "/tree/" ++ commit) ]
+                        [ code [] [ text (String.slice 0 8 commit) ] ]
+                    ]
 
 
 viewSortSelection :
@@ -1406,20 +1442,17 @@ viewPager model total =
                             NoOp
 
                         else
-                            let
-                                remainder =
-                                    if remainderBy model.size total == 0 then
-                                        1
-
-                                    else
-                                        0
-                            in
-                            ChangePage <| ((total // model.size) - remainder) * model.size
+                            ChangePage <| lastPageFrom model.size total
                     ]
                     [ text "Last" ]
                 ]
             ]
         ]
+
+
+lastPageFrom : Int -> Int -> Int
+lastPageFrom size total =
+    max 0 (((total - 1) // size) * size)
 
 
 
@@ -1616,16 +1649,6 @@ showMoreButton toggle isOpen =
 
 
 -- Html Event Helpers
-
-
-onClickStop : msg -> Html.Attribute msg
-onClickStop message =
-    Html.Events.custom "click" <|
-        Json.Decode.succeed
-            { message = message
-            , stopPropagation = True
-            , preventDefault = True
-            }
 
 
 trapClick : Html.Attribute (Msg a b)

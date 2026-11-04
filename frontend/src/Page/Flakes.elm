@@ -22,10 +22,9 @@ import Html.Attributes
         ( class
         , href
         )
-import Html.Events exposing (onClick)
 import Http exposing (Body)
-import Page.Options exposing (Msg(..))
-import Page.Packages exposing (Msg(..))
+import Page.Options
+import Page.Packages
 import Ports
 import RemoteData
 import Route
@@ -34,8 +33,7 @@ import Route
         )
 import Search
     exposing
-        ( Msg(..)
-        , NixOSChannel
+        ( NixOSChannel
         , viewFlakes
         , viewResult
         , viewSearchInput
@@ -139,6 +137,12 @@ update navKey msg model nixosChannels =
                 Page.Packages.CopyToClipboard text_ ->
                     ( PackagesModel model_, Ports.copyToClipboard text_ )
 
+                -- The other messages of the package page do not know which
+                -- route they are on, thus the page itself answers them.
+                other ->
+                    Page.Packages.update navKey other model_ nixosChannels
+                        |> Tuple.mapBoth PackagesModel (Cmd.map PackagesMsg)
+
         _ ->
             ( model, Cmd.none )
 
@@ -190,7 +194,7 @@ view nixosChannels model =
             Html.map OptionsMsg <| mkBody "3rd-party flake options" model_ (Page.Options.viewSuccess model_.activeOptionSource) Page.Options.viewBuckets Page.Options.SearchMsg
 
         PackagesModel model_ ->
-            Html.map PackagesMsg <| mkBody "3rd-party flake packages" model_ Page.Packages.viewSuccess Page.Packages.viewBuckets Page.Packages.SearchMsg
+            Html.map PackagesMsg <| mkBody "3rd-party flake packages" model_ (Page.Packages.viewSuccess model_) Page.Packages.viewBuckets Page.Packages.SearchMsg
 
 
 

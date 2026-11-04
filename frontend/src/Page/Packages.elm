@@ -1,5 +1,6 @@
 module Page.Packages exposing
     ( Aggregations
+    , DesktopEntry
     , LicenseExpression
     , Model
     , Msg(..)
@@ -10,6 +11,7 @@ module Page.Packages exposing
     , ResultPackageLicense
     , ResultPackageMaintainer
     , ResultPackageTeam
+    , Screenshot
     , decodeResultAggregations
     , decodeResultItemSource
     , init
@@ -21,16 +23,20 @@ module Page.Packages exposing
     , viewSuccess
     )
 
+import Browser.Dom
 import Browser.Navigation
+import Dict exposing (Dict)
 import Html
     exposing
         ( Html
         , a
+        , button
         , code
         , div
         , em
         , fieldset
         , h4
+        , img
         , input
         , label
         , legend
@@ -44,17 +50,22 @@ import Html
         )
 import Html.Attributes
     exposing
-        ( checked
+        ( alt
+        , attribute
+        , autofocus
+        , checked
         , class
         , classList
         , href
         , id
         , name
+        , rel
+        , src
         , target
         , title
         , type_
         )
-import Html.Events exposing (onClick)
+import Html.Events exposing (on, onClick, preventDefaultOn, stopPropagationOn)
 import Http exposing (Body)
 import Json.Decode
 import Json.Decode.Pipeline
@@ -70,6 +81,10 @@ import Search
         , viewBucket
         )
 import Search.Query
+import Svg exposing (path, svg)
+import Svg.Attributes as SA
+import Task
+import Url
 import Utils
 
 
@@ -104,6 +119,46 @@ type alias ResultItemSource =
     , flakeDescription : Maybe String
     , flakeUrl : Maybe ( String, String )
     , modularServices : List String
+    , desktopEntries : List DesktopEntry
+
+    -- The file under `/icons` holding each entry's image, keyed by the name the
+    -- entry's `icon` refers to.
+    , desktopIcons : Dict String String
+
+    -- The screenshots the package's AppStream metainfo points at.
+    , screenshots : List Screenshot
+    , depCount : Maybe Int
+    , repologyRepos : Maybe Int
+    }
+
+
+{-| A freedesktop.org desktop entry, as shipped by the package. `icon` names an
+icon rather than holding one; look it up in `desktopIcons` for the file that
+holds it.
+-}
+type alias DesktopEntry =
+    { entryType : Maybe String
+    , desktopName : Maybe String
+    , genericName : Maybe String
+    , comment : Maybe String
+    , icon : Maybe String
+    , mimeTypes : List String
+    , categories : List String
+    , noDisplay : Bool
+    }
+
+
+{-| One of the screenshots a package's AppStream metainfo names. `file` holds
+the thumbnail shown in a result, and `largeFile` the copy a reader who opens it
+gets; both name files under `/screenshots`, which the frontend build writes out
+of the index. `url` is the image on the project's own hosting, at the size
+upstream serves it, which is too large for an index to hold.
+-}
+type alias Screenshot =
+    { url : String
+    , caption : Maybe String
+    , file : Maybe String
+    , largeFile : Maybe String
     }
 
 
@@ -173,6 +228,8 @@ type alias ResultAggregations =
     , package_maintainers_set : Search.Aggregation
     , package_teams_set : Search.Aggregation
     , package_license_set : Search.Aggregation
+    , package_categories_set : Search.Aggregation
+    , package_mime_types_set : Search.Aggregation
     }
 
 
@@ -183,6 +240,8 @@ type alias Aggregations =
     , package_maintainers_set : Search.Aggregation
     , package_teams_set : Search.Aggregation
     , package_license_set : Search.Aggregation
+    , package_categories_set : Search.Aggregation
+    , package_mime_types_set : Search.Aggregation
     }
 
 
@@ -192,6 +251,8 @@ type alias Buckets =
     , maintainers : List String
     , teams : List String
     , platforms : List String
+    , categories : List String
+    , mimeTypes : List String
     }
 
 
@@ -202,6 +263,8 @@ emptyBuckets =
     , maintainers = []
     , teams = []
     , platforms = []
+    , categories = []
+    , mimeTypes = []
     }
 
 
@@ -251,6 +314,10 @@ init options preferStatic searchArgs defaultNixOSChannel nixosChannels includeCh
 type Msg
     = SearchMsg (Search.Msg ResultItemSource ResultAggregations)
     | CopyToClipboard String
+    | ScrollScreenshots String Float
+    | ShowScreenshot String Int
+    | CloseScreenshot
+    | NoOp
 
 
 update :
@@ -276,6 +343,32 @@ update navKey msg model nixosChannels =
         CopyToClipboard text_ ->
             ( model, Ports.copyToClipboard text_ )
 
+        ScrollScreenshots rowId direction ->
+            ( model, Ports.scrollRow { id = rowId, direction = direction } )
+
+        ShowScreenshot itemId index ->
+            ( { model | screenshotShown = Just ( itemId, index ) }
+            , Ports.showModal screenshotLightboxId
+            )
+
+        CloseScreenshot ->
+            ( { model | screenshotShown = Nothing }
+            , case model.screenshotShown of
+                -- The focus goes to the thumbnail of the screenshot that the
+                -- lightbox showed last. `Browser.Dom.focus` waits for the next
+                -- animation frame, thus the dialog that keeps the page inert
+                -- is gone.
+                Just ( itemId, index ) ->
+                    Browser.Dom.focus (screenshotThumbnailId itemId index)
+                        |> Task.attempt (\_ -> NoOp)
+
+                Nothing ->
+                    Cmd.none
+            )
+
+        NoOp ->
+            ( model, Cmd.none )
+
 
 
 -- VIEW
@@ -292,7 +385,7 @@ view nixosChannels model =
         ]
         nixosChannels
         model
-        viewSuccess
+        (viewSuccess model)
         viewBuckets
         SearchMsg
         []
@@ -363,21 +456,152 @@ viewBuckets bucketsAsString result =
             (result.aggregations.package_platforms.buckets |> sortBuckets)
             (createBucketsMsg False .platforms (\s v -> { s | platforms = v }))
             selectedBucket.platforms
+        |> viewBucket
+            Search.CheckboxInput
+            "Categories"
+            (result.aggregations.package_categories_set.buckets |> sortBuckets)
+            (createBucketsMsg False .categories (\s v -> { s | categories = v }))
+            selectedBucket.categories
+        |> viewBucket
+            Search.CheckboxInput
+            "File types"
+            (result.aggregations.package_mime_types_set.buckets |> sortBuckets)
+            (createBucketsMsg False .mimeTypes (\s v -> { s | mimeTypes = v }))
+            selectedBucket.mimeTypes
 
 
 viewSuccess :
-    List NixOSChannel
+    Model
+    -> List NixOSChannel
     -> String
     -> Details
     -> Maybe String
     -> List (Search.ResultItem ResultItemSource)
     -> Html Msg
-viewSuccess nixosChannels channel showUsageDetails show hits =
+viewSuccess model nixosChannels channel showUsageDetails show hits =
+    let
+        -- Only a page that shows an icon needs room for one in each result.
+        showIconMargin =
+            List.any (\hit -> packageIconFile model.saveData hit.source /= Nothing) hits
+    in
     ul [ class "search-results-list" ]
         (List.map
-            (viewResultItem nixosChannels channel showUsageDetails show)
+            (viewResultItem model.saveData showIconMargin model.screenshotShown nixosChannels channel showUsageDetails show)
             hits
         )
+
+
+{-| The desktop entries a result shows. `NoDisplay` entries exist to claim MIME
+types or URL schemes and are kept out of application menus. They still feed the
+category and file type facets, so a package remains findable by what it opens.
+-}
+displayedDesktopEntries : ResultItemSource -> List DesktopEntry
+displayedDesktopEntries source =
+    List.filter (\entry -> not entry.noDisplay) source.desktopEntries
+
+
+{-| The file under `/icons` holding the image of a desktop entry, if there is
+one to show. Icons are served as static files written by the frontend build,
+one per image, named after its contents.
+-}
+desktopIconFile : Bool -> ResultItemSource -> DesktopEntry -> Maybe String
+desktopIconFile saveData source entry =
+    if saveData then
+        Nothing
+
+    else
+        entry.icon
+            |> Maybe.andThen (\iconName -> Dict.get iconName source.desktopIcons)
+
+
+{-| The file holding the icon beside the attribute name of a package: that of
+its first displayed desktop entry with an icon.
+-}
+packageIconFile : Bool -> ResultItemSource -> Maybe String
+packageIconFile saveData source =
+    displayedDesktopEntries source
+        |> List.filterMap (desktopIconFile saveData source)
+        |> List.head
+
+
+{-| The id of the `<dialog>` that shows a screenshot. The page shows one at a
+time.
+-}
+screenshotLightboxId : String
+screenshotLightboxId =
+    "screenshot-lightbox"
+
+
+screenshotThumbnailId : String -> Int -> String
+screenshotThumbnailId itemId index =
+    "screenshot-" ++ itemId ++ "-" ++ String.fromInt index
+
+
+{-| Send `message` on a click without a modifier key, in place of following the
+link. A click with a modifier key follows the link.
+-}
+onPlainClick : msg -> Html.Attribute msg
+onPlainClick message =
+    preventDefaultOn "click"
+        (Json.Decode.map4
+            (\ctrl meta shift alt -> ctrl || meta || shift || alt)
+            (Json.Decode.field "ctrlKey" Json.Decode.bool)
+            (Json.Decode.field "metaKey" Json.Decode.bool)
+            (Json.Decode.field "shiftKey" Json.Decode.bool)
+            (Json.Decode.field "altKey" Json.Decode.bool)
+            |> Json.Decode.andThen
+                (\modified ->
+                    if modified then
+                        Json.Decode.fail "A click with a modifier key follows the link"
+
+                    else
+                        Json.Decode.succeed ( message, True )
+                )
+        )
+
+
+{-| The cross on the button that closes the screenshot lightbox.
+-}
+closeSvg : Html msg
+closeSvg =
+    svg
+        [ SA.width "16"
+        , SA.height "16"
+        , SA.viewBox "0 0 16 16"
+        , SA.fill "none"
+        , attribute "aria-hidden" "true"
+        ]
+        [ path
+            [ SA.d "M3 3L13 13M13 3L3 13"
+            , SA.stroke "currentColor"
+            , SA.strokeWidth "2"
+            , SA.strokeLinecap "round"
+            ]
+            []
+        ]
+
+
+{-| The arrow on a button that moves through the screenshots. It points
+forward; a button that moves back turns it around.
+-}
+chevronSvg : Html msg
+chevronSvg =
+    svg
+        [ SA.width "16"
+        , SA.height "16"
+        , SA.viewBox "0 0 16 16"
+        , SA.fill "none"
+        , attribute "aria-hidden" "true"
+        ]
+        [ path
+            [ SA.d "M6 3L11 8L6 13"
+            , SA.stroke "currentColor"
+            , SA.strokeWidth "2"
+            , SA.strokeLinecap "round"
+            , SA.strokeLinejoin "round"
+            ]
+            []
+        ]
 
 
 {-| Render an install command or configuration snippet together with a
@@ -391,13 +615,16 @@ copyableCommand preClass commandText content =
 
 
 viewResultItem :
-    List NixOSChannel
+    Bool
+    -> Bool
+    -> Maybe ( String, Int )
+    -> List NixOSChannel
     -> String
     -> Details
     -> Maybe String
     -> Search.ResultItem ResultItemSource
     -> Html Msg
-viewResultItem nixosChannels channel showUsageDetails show item =
+viewResultItem saveData showIconMargin screenshotShown nixosChannels channel showUsageDetails show item =
     let
         optionals b l =
             if b then
@@ -429,67 +656,384 @@ viewResultItem nixosChannels channel showUsageDetails show item =
                 ]
                 [ text title ]
 
+        -- A file the last deploy did not write yet is simply not there; an
+        -- `<img>` without alt text renders as nothing rather than as a broken
+        -- image, so a card degrades to the one it showed before icons existed.
+        viewIcon extraClass iconFile =
+            case iconFile of
+                Just file ->
+                    -- Decorative: every entry is labelled in text beside it.
+                    img
+                        [ class extraClass
+                        , src ("/icons/" ++ file)
+                        , alt ""
+                        , attribute "loading" "lazy"
+                        ]
+                        []
+
+                Nothing ->
+                    text ""
+
+        displayedEntries =
+            displayedDesktopEntries item.source
+
+        packageIcon =
+            viewIcon "package-icon" (packageIconFile saveData item.source)
+
+        viewDesktopEntry entry =
+            li []
+                (span [ class "desktop-entry-name" ]
+                    [ viewIcon "desktop-entry-icon" (desktopIconFile saveData item.source entry)
+                    , text (Maybe.withDefault item.source.pname entry.desktopName)
+                    ]
+                    -- `GenericName` says what the application is where its name
+                    -- does not, and `Comment` is the entry's own description,
+                    -- which is often more concrete than the package's.
+                    :: optionals (entry.genericName /= Nothing)
+                        [ div [ class "desktop-entry-detail" ]
+                            [ text (Maybe.withDefault "" entry.genericName) ]
+                        ]
+                    ++ optionals (entry.comment /= Nothing)
+                        [ div [ class "desktop-entry-detail" ]
+                            [ text (Maybe.withDefault "" entry.comment) ]
+                        ]
+                    ++ optionals (not (List.isEmpty entry.categories))
+                        [ div [ class "desktop-entry-detail" ]
+                            [ text ("Categories: " ++ String.join ", " entry.categories) ]
+                        ]
+                    ++ optionals (not (List.isEmpty entry.mimeTypes))
+                        [ div [ class "desktop-entry-detail" ]
+                            [ text ("Opens: " ++ String.join ", " entry.mimeTypes) ]
+                        ]
+                )
+
+        desktopEntries =
+            if List.isEmpty displayedEntries then
+                text ""
+
+            else
+                div []
+                    [ h4 [] [ text "Desktop Entries" ]
+                    , ul [ class "desktop-entries" ]
+                        (List.map viewDesktopEntry displayedEntries)
+                    ]
+
+        -- Screenshots are served as static files by the same build that writes
+        -- the icons, thus one the last deploy did not write is simply not
+        -- there. A screenshot with no thumbnail is left out: there is nothing
+        -- to show for it.
+        mirroredScreenshots =
+            if saveData then
+                []
+
+            else
+                List.filterMap
+                    (\shot -> Maybe.map (Tuple.pair shot) shot.file)
+                    item.source.screenshots
+
+        screenshotCount =
+            List.length mirroredScreenshots
+
+        -- The lightbox shows the larger copy this index holds, and the image
+        -- on the project's own hosting where it holds none.
+        largeScreenshot shot =
+            shot.largeFile
+                |> Maybe.map (\large -> "/screenshots/" ++ large)
+                |> Maybe.withDefault shot.url
+
+        -- A plain click on a thumbnail opens the lightbox. A click with a
+        -- modifier key or the middle button keeps the behavior of a link, and
+        -- opens the larger copy in a new tab.
+        viewScreenshot index ( shot, file ) =
+            li []
+                (a
+                    [ href (largeScreenshot shot)
+                    , target "_blank"
+                    , id (screenshotThumbnailId item.id index)
+                    , title (Maybe.withDefault "Show the larger copy" shot.caption)
+                    , onPlainClick (ShowScreenshot item.id index)
+                    ]
+                    [ img
+                        [ class "screenshot-image"
+                        , src ("/screenshots/" ++ file)
+                        , alt (Maybe.withDefault "" shot.caption)
+                        , attribute "loading" "lazy"
+                        ]
+                        []
+                    ]
+                    :: optionals (shot.caption /= Nothing)
+                        [ div [ class "screenshot-caption" ]
+                            [ text (Maybe.withDefault "" shot.caption) ]
+                        ]
+                )
+
+        -- The row scrolls, thus it gets a button at each end. A pointer can
+        -- also drag the row and the tab key moves along it, but neither says
+        -- so on the first look. One screenshot never scrolls, thus it keeps
+        -- the row alone.
+        scrollButton rowId direction buttonLabel =
+            button
+                [ type_ "button"
+                , classList
+                    [ ( "screenshots-scroll", True )
+                    , ( "back", direction < 0 )
+                    ]
+                , title buttonLabel
+                , attribute "aria-label" buttonLabel
+                , attribute "aria-controls" rowId
+                , onClick (ScrollScreenshots rowId direction)
+                ]
+                [ chevronSvg ]
+
+        -- The lightbox goes around the screenshots of the result, thus the
+        -- last screenshot is followed by the first.
+        stepScreenshot index delta =
+            ShowScreenshot item.id (modBy screenshotCount (index + delta))
+
+        lightboxButton classes buttonLabel message icon =
+            button
+                [ type_ "button"
+                , class classes
+                , title buttonLabel
+                , attribute "aria-label" buttonLabel
+                , onClick message
+                ]
+                [ icon ]
+
+        lightboxStepButton index delta buttonLabel =
+            optionals (screenshotCount > 1)
+                [ lightboxButton
+                    (if delta < 0 then
+                        "screenshot-lightbox-step back"
+
+                     else
+                        "screenshot-lightbox-step"
+                    )
+                    buttonLabel
+                    (stepScreenshot index delta)
+                    chevronSvg
+                ]
+
+        -- The arrow keys show the other screenshots. The Escape key closes
+        -- the dialog through its `cancel` event. No key goes to the page
+        -- behind the dialog, where the Enter, `j` and `k` keys move between
+        -- the results.
+        lightboxKey index =
+            Json.Decode.field "key" Json.Decode.string
+                |> Json.Decode.map
+                    (\key ->
+                        ( case ( key, screenshotCount > 1 ) of
+                            ( "ArrowLeft", True ) ->
+                                stepScreenshot index -1
+
+                            ( "ArrowRight", True ) ->
+                                stepScreenshot index 1
+
+                            _ ->
+                                NoOp
+                        , True
+                        )
+                    )
+
+        -- A click on the area around the image closes the dialog. The dialog
+        -- fills the window, thus a click on the backdrop is a click on the
+        -- dialog itself.
+        lightboxClick =
+            Json.Decode.oneOf
+                [ Json.Decode.at [ "target", "className" ] Json.Decode.string
+                , Json.Decode.succeed ""
+                ]
+                |> Json.Decode.map
+                    (\classes ->
+                        ( if
+                            List.any
+                                (\c -> List.member c [ "screenshot-lightbox", "screenshot-lightbox-stage" ])
+                                (String.words classes)
+                          then
+                            CloseScreenshot
+
+                          else
+                            NoOp
+                        , True
+                        )
+                    )
+
+        -- A click on the image opens the image on the project's own hosting,
+        -- at the size upstream serves it.
+        viewLightbox index ( shot, _ ) =
+            Html.node "dialog"
+                [ id screenshotLightboxId
+                , class "screenshot-lightbox"
+                , attribute "aria-label" "Screenshots"
+                , stopPropagationOn "click" lightboxClick
+                , stopPropagationOn "keydown" (lightboxKey index)
+                , preventDefaultOn "cancel" (Json.Decode.succeed ( CloseScreenshot, True ))
+                , on "close" (Json.Decode.succeed CloseScreenshot)
+                ]
+                [ div [ class "screenshot-lightbox-bar" ]
+                    [ span [ class "screenshot-lightbox-position" ]
+                        [ text (String.fromInt (index + 1) ++ " / " ++ String.fromInt screenshotCount) ]
+                    , a
+                        [ href shot.url
+                        , target "_blank"
+                        , rel "noopener"
+                        ]
+                        [ text "Open the original" ]
+                    , button
+                        [ type_ "button"
+                        , class "screenshot-lightbox-close"
+                        , title "Close"
+                        , attribute "aria-label" "Close"
+                        , autofocus True
+                        , onClick CloseScreenshot
+                        ]
+                        [ closeSvg ]
+                    ]
+                , div [ class "screenshot-lightbox-stage" ]
+                    (lightboxStepButton index -1 "Show the previous screenshot"
+                        ++ a
+                            [ href shot.url
+                            , target "_blank"
+                            , rel "noopener"
+                            , title "Open the original"
+                            ]
+                            [ img
+                                [ class "screenshot-lightbox-image"
+                                , src (largeScreenshot shot)
+                                , alt (Maybe.withDefault "" shot.caption)
+                                ]
+                                []
+                            ]
+                        :: lightboxStepButton index 1 "Show the next screenshot"
+                    )
+                , case shot.caption of
+                    Just caption ->
+                        p [ class "screenshot-lightbox-caption" ] [ text caption ]
+
+                    Nothing ->
+                        text ""
+                ]
+
+        screenshots =
+            if List.isEmpty mirroredScreenshots then
+                text ""
+
+            else
+                let
+                    rowId =
+                        "screenshots-" ++ item.id
+
+                    scrollable =
+                        screenshotCount > 1
+
+                    lightbox =
+                        case screenshotShown of
+                            Just ( shownId, index ) ->
+                                if shownId == item.id then
+                                    List.drop index mirroredScreenshots
+                                        |> List.head
+                                        |> Maybe.map (viewLightbox index)
+                                        |> Maybe.withDefault (text "")
+
+                                else
+                                    text ""
+
+                            Nothing ->
+                                text ""
+                in
+                div []
+                    [ h4 [] [ text "Screenshots" ]
+                    , div [ class "screenshots-row" ]
+                        (optionals scrollable
+                            [ scrollButton rowId -1.0 "Show the previous screenshots" ]
+                            ++ ul [ class "screenshots", id rowId ]
+                                (List.indexedMap viewScreenshot mirroredScreenshots)
+                            :: optionals scrollable
+                                [ scrollButton rowId 1.0 "Show the next screenshots" ]
+                        )
+                    , lightbox
+                    ]
+
+        versionItems : List (Html Msg)
+        versionItems =
+            optionals (not (String.isEmpty item.source.pversion))
+                [ li []
+                    [ text "Version: "
+                    , strong [] [ text item.source.pversion ]
+                    ]
+                ]
+
+        outputItems : List (Html Msg)
+        outputItems =
+            let
+                defaultOutput : List (Html Msg)
+                defaultOutput =
+                    item.source.default_output
+                        |> Maybe.map (\d -> strong [] [ text d ])
+                        |> Maybe.map List.singleton
+                        |> Maybe.withDefault []
+
+                otherOutputs : List (Html Msg)
+                otherOutputs =
+                    item.source.outputs
+                        |> List.filter (\o -> Just o /= item.source.default_output)
+                        |> List.sort
+                        |> List.map (\o -> text o)
+            in
+            optionals (List.length item.source.outputs > 1)
+                [ li []
+                    [ text "Outputs: "
+                    , inlineListCode (defaultOutput ++ otherOutputs)
+                    ]
+                ]
+
+        homepageItems : List (Html Msg)
+        homepageItems =
+            item.source.homepage
+                |> List.head
+                |> Maybe.map
+                    (\x ->
+                        [ li [ trapClick ]
+                            [ createShortDetailsItem "🌐 Homepage" x ]
+                        ]
+                    )
+                |> Maybe.withDefault []
+
+        licenseItems : List (Html Msg)
+        licenseItems =
+            case item.source.licenseExpression of
+                Just expression ->
+                    [ li [ class "package-license" ]
+                        (text "License: "
+                            :: renderLicenseExpression expression
+                        )
+                    ]
+
+                Nothing ->
+                    let
+                        licenses : List (Html Msg)
+                        licenses =
+                            item.source.licenses
+                                |> List.map renderLicenseLeaf
+                    in
+                    optionals (not (List.isEmpty licenses))
+                        [ li []
+                            [ text "License: "
+                            , inlineListCode licenses
+                            ]
+                        ]
+
         shortPackageDetails =
             ul [ class "package-short-details" ]
                 (li []
                     [ text "Name: "
                     , code [ class "package-name" ] [ text item.source.pname ]
                     ]
-                    :: (optionals (not (String.isEmpty item.source.pversion))
-                            [ li []
-                                [ text "Version: "
-                                , strong [] [ text item.source.pversion ]
-                                ]
-                            ]
-                            ++ optionals (List.length item.source.outputs > 1)
-                                [ li []
-                                    [ text "Outputs: "
-                                    , inlineListCode
-                                        ((item.source.default_output
-                                            |> Maybe.map (\d -> strong [] [ text d ])
-                                            |> Maybe.map List.singleton
-                                            |> Maybe.withDefault []
-                                         )
-                                            ++ (item.source.outputs
-                                                    |> List.filter (\o -> Just o /= item.source.default_output)
-                                                    |> List.sort
-                                                    |> List.map (\o -> text o)
-                                               )
-                                        )
-                                    ]
-                                ]
-                            ++ (item.source.homepage
-                                    |> List.head
-                                    |> Maybe.map
-                                        (\x ->
-                                            [ li [ trapClick ]
-                                                [ createShortDetailsItem "🌐 Homepage" x ]
-                                            ]
-                                        )
-                                    |> Maybe.withDefault []
-                               )
+                    :: (versionItems
+                            ++ outputItems
+                            ++ homepageItems
                             ++ renderSource item nixosChannels channel trapClick createShortDetailsItem createGithubUrl
-                            ++ (case item.source.licenseExpression of
-                                    Just expression ->
-                                        [ li []
-                                            (text "License: "
-                                                :: renderLicenseExpression expression
-                                            )
-                                        ]
-
-                                    Nothing ->
-                                        let
-                                            licenses =
-                                                item.source.licenses
-                                                    |> List.map renderLicenseLeaf
-                                        in
-                                        optionals (not (List.isEmpty licenses))
-                                            [ li []
-                                                [ text "License: "
-                                                , inlineListCode licenses
-                                                ]
-                                            ]
-                               )
+                            ++ licenseItems
                        )
                 )
 
@@ -567,11 +1111,7 @@ viewResultItem nixosChannels channel showUsageDetails show item =
                             []
 
                         nonEmptyScope ->
-                            [ ul []
-                                [ li []
-                                    [ em [] [ text nonEmptyScope ] ]
-                                ]
-                            ]
+                            [ ul [] [ li [] [ em [] [ text nonEmptyScope ] ] ] ]
             in
             li [] <|
                 case Maybe.withDefault [] team.githubTeams of
@@ -706,17 +1246,14 @@ viewResultItem nixosChannels channel showUsageDetails show item =
 
                 Just ( flakeRef, _ ) ->
                     let
-                        repoName =
-                            flakeRef
-                                |> String.split "/"
-                                |> List.filter (\segment -> not (String.isEmpty segment))
-                                |> List.reverse
-                                |> List.head
-                                |> Maybe.withDefault item.source.attr_name
-
                         term =
                             if item.source.attr_name == "default" && String.contains "/" flakeRef then
-                                repoName
+                                flakeRef
+                                    |> String.split "/"
+                                    |> List.filter (\segment -> not (String.isEmpty segment))
+                                    |> List.reverse
+                                    |> List.head
+                                    |> Maybe.withDefault item.source.attr_name
 
                             else
                                 item.source.attr_name
@@ -725,6 +1262,66 @@ viewResultItem nixosChannels channel showUsageDetails show item =
                         "Search flake options for "
                         term
                         ("/flakes?type=options&query=" ++ term)
+
+        popularity =
+            let
+                pluralize count singular plural =
+                    String.fromInt count
+                        ++ " "
+                        ++ (if count == 1 then
+                                singular
+
+                            else
+                                plural
+                           )
+
+                -- `package_dep_count` is absent both for packages without
+                -- dependents and for packages not evaluated on x86_64-linux,
+                -- thus do not show 0.
+                depCountItem : Maybe (Html Msg)
+                depCountItem =
+                    item.source.depCount
+                        |> Maybe.map viewDepCount
+
+                viewDepCount : Int -> Html Msg
+                viewDepCount count =
+                    li []
+                        [ span [ title "Number of packages in nixpkgs that use this package as a direct dependency, on x86_64-linux" ]
+                            [ text (pluralize count "dependent" "dependents") ]
+                        ]
+
+                repologyItem : Maybe (Html Msg)
+                repologyItem =
+                    item.source.repologyRepos
+                        |> Maybe.map viewRepologyCount
+
+                repologyUrl : String
+                repologyUrl =
+                    "https://repology.org/tools/project-by?repo=nix_unstable&name_type=srcname&target_page=project_versions&name="
+                        ++ Url.percentEncode item.source.attr_name
+
+                viewRepologyCount : Int -> Html Msg
+                viewRepologyCount count =
+                    li []
+                        [ span [ title "Number of package repositories that contain this project, as counted by Repology" ]
+                            [ text (pluralize count "repository" "repositories") ]
+                        , text " on "
+                        , a
+                            [ href repologyUrl
+                            , target "_blank"
+                            ]
+                            [ text "Repology" ]
+                        ]
+            in
+            case List.filterMap identity [ depCountItem, repologyItem ] of
+                [] ->
+                    text ""
+
+                items ->
+                    div [ class "package-popularity" ]
+                        [ h4 [] [ text "Popularity" ]
+                        , ul [] items
+                        ]
 
         longerPackageDetails =
             optionals (Just item.source.attr_name == show)
@@ -736,197 +1333,21 @@ viewResultItem nixosChannels channel showUsageDetails show item =
                         )
                     , case item.source.flakeUrl of
                         Just ( flakeUrl, _ ) ->
-                            div [ class "package-usage" ]
-                                [ fieldset
-                                    [ class "radio-group-tabs usage-radios" ]
-                                    [ legend [ class "usage-title" ]
-                                        [ text "Usage" ]
-                                    , div [ class "radio-tabs-list" ]
-                                        [ label
-                                            [ class "usage-radio active" ]
-                                            [ text "Install from flake"
-                                            , input
-                                                [ type_ "radio"
-                                                , name ("usage-method-" ++ item.source.attr_name)
-                                                , checked True
-                                                ]
-                                                []
-                                            ]
-                                        ]
-                                    ]
-                                , div
-                                    [ class "tab-content" ]
-                                    [ copyableCommand "code-block shell-command"
-                                        ("nix profile add " ++ flakeUrl ++ "#" ++ item.source.attr_name)
-                                        [ text "nix profile add "
-                                        , strong [] [ text flakeUrl ]
-                                        , text "#"
-                                        , em [] [ text item.source.attr_name ]
-                                        ]
-                                    ]
-                                ]
+                            viewFlakeUsage item.source.attr_name flakeUrl
 
                         Nothing ->
-                            let
-                                currentMethod =
-                                    if showUsageDetails == Search.Unset then
-                                        Search.ViaNixShell
-
-                                    else
-                                        showUsageDetails
-
-                                methods =
-                                    [ ( Search.ViaNixShell, "nix-shell", False )
-                                    , ( Search.ViaNixOS, "NixOS Configuration", False )
-                                    , ( Search.ViaNixProfile, "nix profile", False )
-                                    , ( Search.ViaNixEnv, "nix-env", True )
-                                    ]
-                            in
-                            div [ class "package-usage" ]
-                                [ fieldset
-                                    [ class "radio-group-tabs usage-radios" ]
-                                    [ legend [ class "usage-title" ]
-                                        [ text "Usage" ]
-                                    , div [ class "radio-tabs-list" ]
-                                        (List.map
-                                            (\( method, labelText, isDeprecated ) ->
-                                                let
-                                                    isActive =
-                                                        currentMethod == method
-                                                in
-                                                label
-                                                    [ classList
-                                                        [ ( "usage-radio", True )
-                                                        , ( "active", isActive )
-                                                        , ( "deprecated", isDeprecated )
-                                                        ]
-                                                    ]
-                                                    [ text labelText
-                                                    , input
-                                                        [ type_ "radio"
-                                                        , name ("usage-method-" ++ item.source.attr_name)
-                                                        , checked isActive
-                                                        , onClick <| SearchMsg <| Search.ShowUsageDetails method
-                                                        ]
-                                                        []
-                                                    ]
-                                            )
-                                            methods
-                                        )
-                                    ]
-                                , div
-                                    [ class "tab-content" ]
-                                    (case currentMethod of
-                                        Search.ViaNixEnv ->
-                                            [ p []
-                                                [ strong [] [ text "Warning:" ]
-                                                , text " Using "
-                                                , code [] [ text "nix-env" ]
-                                                , text """
-                                                permanently modifies a local profile of installed packages.
-                                                This must be updated and maintained by the user in the same
-                                                way as with a traditional package manager, foregoing many
-                                                of the benefits that make Nix uniquely powerful. Using
-                                                """
-                                                , code [] [ text "nix-shell" ]
-                                                , text """
-                                                or a NixOS configuration is recommended instead.
-                                                """
-                                                ]
-                                            , p [] [ strong [] [ text "On NixOS:" ] ]
-                                            , copyableCommand "code-block shell-command"
-                                                ("nix-env -iA nixos." ++ item.source.attr_name)
-                                                [ text "nix-env -iA nixos."
-                                                , strong [] [ text item.source.attr_name ]
-                                                ]
-                                            , p [] []
-                                            , p [] [ strong [] [ text "On Non NixOS:" ] ]
-                                            , copyableCommand "code-block shell-command"
-                                                ("# without flakes:\nnix-env -iA nixpkgs." ++ item.source.attr_name ++ "\n# with flakes:\nnix profile add nixpkgs#" ++ item.source.attr_name)
-                                                [ text "# without flakes:\nnix-env -iA nixpkgs."
-                                                , strong [] [ text item.source.attr_name ]
-                                                , text "\n# with flakes:\nnix profile add nixpkgs#"
-                                                , strong [] [ text item.source.attr_name ]
-                                                ]
-                                            ]
-
-                                        Search.ViaNixOS ->
-                                            [ p []
-                                                [ text "Add the following Nix code to your NixOS Configuration, usually located in "
-                                                , strong [] [ text "/etc/nixos/configuration.nix" ]
-                                                ]
-                                            , copyableCommand "code-block"
-                                                ("  environment.systemPackages = [\n    pkgs." ++ item.source.attr_name ++ "\n  ];")
-                                                [ text <| "  environment.systemPackages = [\n    pkgs."
-                                                , strong [] [ text item.source.attr_name ]
-                                                , text <| "\n  ];"
-                                                ]
-                                            ]
-
-                                        Search.ViaNixProfile ->
-                                            [ copyableCommand "code-block shell-command"
-                                                ("nix profile add nixpkgs#" ++ item.source.attr_name)
-                                                [ text "nix profile add nixpkgs#"
-                                                , strong [] [ text item.source.attr_name ]
-                                                ]
-                                            ]
-
-                                        _ ->
-                                            [ p []
-                                                [ text """
-                                                A nix-shell will temporarily modify
-                                                your $PATH environment variable.
-                                                This can be used to try a piece of
-                                                software before deciding to
-                                                permanently install it.
-                                              """
-                                                ]
-                                            , copyableCommand "code-block shell-command"
-                                                ("nix-shell -p " ++ item.source.attr_name)
-                                                [ text "nix-shell -p "
-                                                , strong [] [ text item.source.attr_name ]
-                                                ]
-                                            ]
-                                    )
-                                ]
+                            viewNixpkgsUsage item.source.attr_name showUsageDetails
                     , programs
+                    , desktopEntries
+                    , screenshots
                     , maintainersTeamsAndPlatforms
                     , optionsLink
+                    , popularity
                     , if List.isEmpty item.source.modularServices then
                         text ""
 
                       else
-                        div []
-                            [ h4 []
-                                [ text "Modular Services"
-                                , text " "
-                                , a
-                                    [ href "https://nixos.org/manual/nixos/stable/#modular-services"
-                                    , Html.Attributes.target "_blank"
-                                    , Html.Attributes.title "What are modular services?"
-                                    ]
-                                    [ text "(?)" ]
-                                ]
-                            , ul []
-                                (List.map
-                                    (\mod_ ->
-                                        let
-                                            suffix =
-                                                if mod_ == "default" then
-                                                    ""
-
-                                                else
-                                                    "." ++ mod_
-                                        in
-                                        li []
-                                            [ a
-                                                [ href ("/options?channel=" ++ channel ++ "&query=" ++ item.source.attr_name ++ "&include_nixos_options=0") ]
-                                                [ code [] [ text ("pkgs." ++ item.source.attr_name ++ ".services" ++ suffix) ] ]
-                                            ]
-                                    )
-                                    item.source.modularServices
-                                )
-                            ]
+                        viewModularServices channel item.source.attr_name item.source.modularServices
                     ]
                 ]
 
@@ -962,16 +1383,220 @@ viewResultItem nixosChannels channel showUsageDetails show item =
     in
     li
         [ class "package"
-        , classList [ ( "opened", isOpen ) ]
+
+        -- The icon is in a margin to the left of the result, thus all lines
+        -- of all results start in one column.
+        , classList [ ( "opened", isOpen ), ( "with-icon-margin", showIconMargin ) ]
         , Search.elementId item.source.attr_name
         ]
-        ([ span [ class "search-result-title" ] flakeOrNixpkgs
+        ([ span [ class "search-result-title" ] (packageIcon :: flakeOrNixpkgs)
          , div [ class "package-description" ] [ text <| Maybe.withDefault "" item.source.description ]
          , shortPackageDetails
          , Search.showMoreButton toggle isOpen
          ]
             ++ longerPackageDetails
         )
+
+
+viewFlakeUsage : String -> String -> Html Msg
+viewFlakeUsage attrName flakeUrl =
+    div [ class "package-usage" ]
+        [ fieldset
+            [ class "radio-group-tabs usage-radios" ]
+            [ legend [ class "usage-title" ]
+                [ text "Usage" ]
+            , div [ class "radio-tabs-list" ]
+                [ label
+                    [ class "usage-radio active" ]
+                    [ text "Install from flake"
+                    , input
+                        [ type_ "radio"
+                        , name ("usage-method-" ++ attrName)
+                        , checked True
+                        ]
+                        []
+                    ]
+                ]
+            ]
+        , div
+            [ class "tab-content" ]
+            [ copyableCommand "code-block shell-command"
+                ("nix profile add " ++ flakeUrl ++ "#" ++ attrName)
+                [ text "nix profile add "
+                , strong [] [ text flakeUrl ]
+                , text "#"
+                , em [] [ text attrName ]
+                ]
+            ]
+        ]
+
+
+viewNixpkgsUsage : String -> Details -> Html Msg
+viewNixpkgsUsage attrName showUsageDetails =
+    let
+        currentMethod : Details
+        currentMethod =
+            if showUsageDetails == Search.Unset then
+                Search.ViaNixShell
+
+            else
+                showUsageDetails
+
+        methods : List ( Details, String, Bool )
+        methods =
+            [ ( Search.ViaNixShell, "nix-shell", False )
+            , ( Search.ViaNixOS, "NixOS Configuration", False )
+            , ( Search.ViaNixProfile, "nix profile", False )
+            , ( Search.ViaNixEnv, "nix-env", True )
+            ]
+    in
+    div [ class "package-usage" ]
+        [ fieldset
+            [ class "radio-group-tabs usage-radios" ]
+            [ legend [ class "usage-title" ]
+                [ text "Usage" ]
+            , div [ class "radio-tabs-list" ]
+                (List.map (viewUsageMethod attrName currentMethod) methods)
+            ]
+        , div
+            [ class "tab-content" ]
+            (viewUsageInstructions attrName currentMethod)
+        ]
+
+
+viewUsageMethod : String -> Details -> ( Details, String, Bool ) -> Html Msg
+viewUsageMethod attrName currentMethod ( method, labelText, isDeprecated ) =
+    let
+        isActive : Bool
+        isActive =
+            currentMethod == method
+    in
+    label
+        [ classList
+            [ ( "usage-radio", True )
+            , ( "active", isActive )
+            , ( "deprecated", isDeprecated )
+            ]
+        ]
+        [ text labelText
+        , input
+            [ type_ "radio"
+            , name ("usage-method-" ++ attrName)
+            , checked isActive
+            , onClick <| SearchMsg <| Search.ShowUsageDetails method
+            ]
+            []
+        ]
+
+
+viewUsageInstructions : String -> Details -> List (Html Msg)
+viewUsageInstructions attrName currentMethod =
+    case currentMethod of
+        Search.ViaNixEnv ->
+            [ p []
+                [ strong [] [ text "Warning:" ]
+                , text " Using "
+                , code [] [ text "nix-env" ]
+                , text """
+                                                permanently modifies a local profile of installed packages.
+                                                This must be updated and maintained by the user in the same
+                                                way as with a traditional package manager, foregoing many
+                                                of the benefits that make Nix uniquely powerful. Using
+                                                """
+                , code [] [ text "nix-shell" ]
+                , text """
+                                                or a NixOS configuration is recommended instead.
+                                                """
+                ]
+            , p [] [ strong [] [ text "On NixOS:" ] ]
+            , copyableCommand "code-block shell-command"
+                ("nix-env -iA nixos." ++ attrName)
+                [ text "nix-env -iA nixos."
+                , strong [] [ text attrName ]
+                ]
+            , p [] []
+            , p [] [ strong [] [ text "On Non NixOS:" ] ]
+            , copyableCommand "code-block shell-command"
+                ("# without flakes:\nnix-env -iA nixpkgs." ++ attrName ++ "\n# with flakes:\nnix profile add nixpkgs#" ++ attrName)
+                [ text "# without flakes:\nnix-env -iA nixpkgs."
+                , strong [] [ text attrName ]
+                , text "\n# with flakes:\nnix profile add nixpkgs#"
+                , strong [] [ text attrName ]
+                ]
+            ]
+
+        Search.ViaNixOS ->
+            [ p []
+                [ text "Add the following Nix code to your NixOS Configuration, usually located in "
+                , strong [] [ text "/etc/nixos/configuration.nix" ]
+                ]
+            , copyableCommand "code-block"
+                ("  environment.systemPackages = [\n    pkgs." ++ attrName ++ "\n  ];")
+                [ text <| "  environment.systemPackages = [\n    pkgs."
+                , strong [] [ text attrName ]
+                , text <| "\n  ];"
+                ]
+            ]
+
+        Search.ViaNixProfile ->
+            [ copyableCommand "code-block shell-command"
+                ("nix profile add nixpkgs#" ++ attrName)
+                [ text "nix profile add nixpkgs#"
+                , strong [] [ text attrName ]
+                ]
+            ]
+
+        _ ->
+            [ p []
+                [ text """
+                                                A nix-shell will temporarily modify
+                                                your $PATH environment variable.
+                                                This can be used to try a piece of
+                                                software before deciding to
+                                                permanently install it.
+                                              """
+                ]
+            , copyableCommand "code-block shell-command"
+                ("nix-shell -p " ++ attrName)
+                [ text "nix-shell -p "
+                , strong [] [ text attrName ]
+                ]
+            ]
+
+
+viewModularServices : String -> String -> List String -> Html msg
+viewModularServices channel attrName modularServices =
+    div []
+        [ h4 []
+            [ text "Modular Services"
+            , text " "
+            , a
+                [ href "https://nixos.org/manual/nixos/stable/#modular-services"
+                , Html.Attributes.target "_blank"
+                , Html.Attributes.title "What are modular services?"
+                ]
+                [ text "(?)" ]
+            ]
+        , ul [] (List.map (viewModularService channel attrName) modularServices)
+        ]
+
+
+viewModularService : String -> String -> String -> Html msg
+viewModularService channel attrName mod_ =
+    let
+        suffix : String
+        suffix =
+            if mod_ == "default" then
+                ""
+
+            else
+                "." ++ mod_
+    in
+    li []
+        [ a
+            [ href ("/options?channel=" ++ channel ++ "&query=" ++ attrName ++ "&include_nixos_options=0") ]
+            [ code [] [ text ("pkgs." ++ attrName ++ ".services" ++ suffix) ] ]
+        ]
 
 
 inlineListElementsCopyableCode : (a -> String) -> (a -> String) -> (a -> Html Msg) -> List a -> Html Msg
@@ -1215,6 +1840,8 @@ encodeRequestBody query from size maybeBuckets sort =
         , ( "package_maintainers_set", currentBuckets.maintainers )
         , ( "package_teams_set", currentBuckets.teams )
         , ( "package_platforms", currentBuckets.platforms )
+        , ( "package_categories_set", currentBuckets.categories )
+        , ( "package_mime_types_set", currentBuckets.mimeTypes )
         ]
 
 
@@ -1235,17 +1862,28 @@ encodeBuckets options =
         , ( "package_maintainers_set", Json.Encode.list Json.Encode.string options.maintainers )
         , ( "package_teams_set", Json.Encode.list Json.Encode.string options.teams )
         , ( "package_platforms", Json.Encode.list Json.Encode.string options.platforms )
+        , ( "package_categories_set", Json.Encode.list Json.Encode.string options.categories )
+        , ( "package_mime_types_set", Json.Encode.list Json.Encode.string options.mimeTypes )
         ]
 
 
 decodeBuckets : Json.Decode.Decoder Buckets
 decodeBuckets =
-    Json.Decode.map5 Buckets
-        (Json.Decode.field "package_attr_set" (Json.Decode.list Json.Decode.string))
-        (Json.Decode.field "package_license_set" (Json.Decode.list Json.Decode.string))
-        (Json.Decode.field "package_maintainers_set" (Json.Decode.list Json.Decode.string))
-        (Json.Decode.field "package_teams_set" (Json.Decode.list Json.Decode.string))
-        (Json.Decode.field "package_platforms" (Json.Decode.list Json.Decode.string))
+    let
+        -- Buckets travel in the URL, so a link made before a facet existed is
+        -- missing its key. Decoding those as absent rather than as a failure
+        -- keeps the rest of the link's selection.
+        strings field =
+            Json.Decode.Pipeline.optional field (Json.Decode.list Json.Decode.string) []
+    in
+    Json.Decode.succeed Buckets
+        |> strings "package_attr_set"
+        |> strings "package_license_set"
+        |> strings "package_maintainers_set"
+        |> strings "package_teams_set"
+        |> strings "package_platforms"
+        |> strings "package_categories_set"
+        |> strings "package_mime_types_set"
 
 
 decodeResultItemSource : Json.Decode.Decoder ResultItemSource
@@ -1275,6 +1913,33 @@ decodeResultItemSource =
         |> Json.Decode.Pipeline.optional "flake_description" (Json.Decode.map Just Json.Decode.string) Nothing
         |> Json.Decode.Pipeline.optional "flake_resolved" (Json.Decode.map Just decodeResolvedFlake) Nothing
         |> Json.Decode.Pipeline.optional "package_modular_services" (Json.Decode.list Json.Decode.string) []
+        |> Json.Decode.Pipeline.optional "package_desktop_entries" (Json.Decode.list decodeDesktopEntry) []
+        |> Json.Decode.Pipeline.optional "package_desktop_icons" (Json.Decode.dict Json.Decode.string) Dict.empty
+        |> Json.Decode.Pipeline.optional "package_screenshots" (Json.Decode.list decodeScreenshot) []
+        |> Json.Decode.Pipeline.optional "package_dep_count" (Json.Decode.map Just Json.Decode.int) Nothing
+        |> Json.Decode.Pipeline.optional "package_repology_repos" (Json.Decode.map Just Json.Decode.int) Nothing
+
+
+decodeDesktopEntry : Json.Decode.Decoder DesktopEntry
+decodeDesktopEntry =
+    Json.Decode.succeed DesktopEntry
+        |> Json.Decode.Pipeline.optional "type" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "desktopName" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "genericName" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "comment" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "icon" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "mimeTypes" (Json.Decode.list Json.Decode.string) []
+        |> Json.Decode.Pipeline.optional "categories" (Json.Decode.list Json.Decode.string) []
+        |> Json.Decode.Pipeline.optional "noDisplay" Json.Decode.bool False
+
+
+decodeScreenshot : Json.Decode.Decoder Screenshot
+decodeScreenshot =
+    Json.Decode.succeed Screenshot
+        |> Json.Decode.Pipeline.required "url" Json.Decode.string
+        |> Json.Decode.Pipeline.optional "caption" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "file" (Json.Decode.nullable Json.Decode.string) Nothing
+        |> Json.Decode.Pipeline.optional "largeFile" (Json.Decode.nullable Json.Decode.string) Nothing
 
 
 type alias ResolvedFlake =
@@ -1456,21 +2121,31 @@ decodeResultPackageHydraPath =
 
 decodeResultAggregations : Json.Decode.Decoder ResultAggregations
 decodeResultAggregations =
-    Json.Decode.map6 ResultAggregations
+    let
+        -- Each facet is counted inside a `filter` aggregation of the same
+        -- name, see `Search.Query.toAggregations`.
+        filtered field =
+            Json.Decode.at [ field, field ] Search.decodeAggregation
+    in
+    Json.Decode.map8 ResultAggregations
         (Json.Decode.field "all" decodeAggregations)
-        (Json.Decode.field "package_platforms" Search.decodeAggregation)
-        (Json.Decode.field "package_attr_set" Search.decodeAggregation)
-        (Json.Decode.field "package_maintainers_set" Search.decodeAggregation)
-        (Json.Decode.field "package_teams_set" Search.decodeAggregation)
-        (Json.Decode.field "package_license_set" Search.decodeAggregation)
+        (filtered "package_platforms")
+        (filtered "package_attr_set")
+        (filtered "package_maintainers_set")
+        (filtered "package_teams_set")
+        (filtered "package_license_set")
+        (filtered "package_categories_set")
+        (filtered "package_mime_types_set")
 
 
 decodeAggregations : Json.Decode.Decoder Aggregations
 decodeAggregations =
-    Json.Decode.map6 Aggregations
+    Json.Decode.map8 Aggregations
         (Json.Decode.field "doc_count" Json.Decode.int)
         (Json.Decode.field "package_platforms" Search.decodeAggregation)
         (Json.Decode.field "package_attr_set" Search.decodeAggregation)
         (Json.Decode.field "package_maintainers_set" Search.decodeAggregation)
         (Json.Decode.field "package_teams_set" Search.decodeAggregation)
         (Json.Decode.field "package_license_set" Search.decodeAggregation)
+        (Json.Decode.field "package_categories_set" Search.decodeAggregation)
+        (Json.Decode.field "package_mime_types_set" Search.decodeAggregation)
