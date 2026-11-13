@@ -10,6 +10,7 @@ module Page.Packages exposing
     , ResultPackageHydraPath
     , ResultPackageLicense
     , ResultPackageMaintainer
+    , ResultPackageProblem
     , ResultPackageTeam
     , Screenshot
     , decodeResultAggregations
@@ -17,6 +18,7 @@ module Page.Packages exposing
     , init
     , makeRequest
     , makeRequestBody
+    , toggleProblemKind
     , update
     , view
     , viewBuckets
@@ -35,7 +37,7 @@ import Html
         , div
         , em
         , fieldset
-        , h4
+        , h3
         , img
         , input
         , label
@@ -71,6 +73,7 @@ import Json.Decode
 import Json.Decode.Pipeline
 import Json.Encode
 import List.Extra
+import Material.Icons as Icons
 import Ports
 import Regex
 import Route exposing (SearchType)
@@ -119,6 +122,7 @@ type alias ResultItemSource =
     , flakeDescription : Maybe String
     , flakeUrl : Maybe ( String, String )
     , modularServices : List String
+    , nixosModules : List String
     , desktopEntries : List DesktopEntry
 
     -- The file under `/icons` holding each entry's image, keyed by the name the
@@ -129,6 +133,17 @@ type alias ResultItemSource =
     , screenshots : List Screenshot
     , depCount : Maybe Int
     , repologyRepos : Maybe Int
+    , problems : List ResultPackageProblem
+    }
+
+
+{-| An entry of the package's `meta.problems`. One package can have more
+problems of the same kind.
+-}
+type alias ResultPackageProblem =
+    { kind : String
+    , message : Maybe String
+    , urls : List String
     }
 
 
@@ -230,6 +245,7 @@ type alias ResultAggregations =
     , package_license_set : Search.Aggregation
     , package_categories_set : Search.Aggregation
     , package_mime_types_set : Search.Aggregation
+    , package_problem_kinds_set : Search.Aggregation
     }
 
 
@@ -242,6 +258,7 @@ type alias Aggregations =
     , package_license_set : Search.Aggregation
     , package_categories_set : Search.Aggregation
     , package_mime_types_set : Search.Aggregation
+    , package_problem_kinds_set : Search.Aggregation
     }
 
 
@@ -253,6 +270,7 @@ type alias Buckets =
     , platforms : List String
     , categories : List String
     , mimeTypes : List String
+    , problemKinds : List String
     }
 
 
@@ -265,6 +283,7 @@ emptyBuckets =
     , platforms = []
     , categories = []
     , mimeTypes = []
+    , problemKinds = []
     }
 
 
@@ -376,13 +395,12 @@ update navKey msg model nixosChannels =
 
 view :
     List NixOSChannel
+    -> Dict String Int
     -> Model
     -> Html Msg
-view nixosChannels model =
+view nixosChannels docCounts model =
     Search.view { categoryName = "packages" }
-        [ text "Search more than "
-        , strong [] [ text "140 000 packages" ]
-        ]
+        (Search.viewCountTitle "packages" (Dict.get "package" docCounts))
         nixosChannels
         model
         (viewSuccess model)
@@ -403,6 +421,14 @@ viewBuckets bucketsAsString result =
         selectedBucket =
             initialBuckets
 
+        updateBucketsMsg mergeBuckets value =
+            value
+                |> mergeBuckets initialBuckets
+                |> encodeBuckets
+                |> Json.Encode.encode 0
+                |> Search.BucketsChange
+                |> SearchMsg
+
         createBucketsMsg isRadio getBucket mergeBuckets value =
             (if isRadio then
                 if getBucket initialBuckets == [ value ] then
@@ -414,60 +440,138 @@ viewBuckets bucketsAsString result =
              else
                 Utils.toggleList (getBucket initialBuckets) value
             )
-                |> mergeBuckets initialBuckets
-                |> encodeBuckets
-                |> Json.Encode.encode 0
-                |> Search.BucketsChange
-                |> SearchMsg
+                |> updateBucketsMsg mergeBuckets
 
         sortBuckets items =
             items
                 |> List.sortBy .doc_count
                 |> List.reverse
+
+        -- Keep `<kind>` next to `not <kind>`, whatever their counts are.
+        sortProblemKindBuckets =
+            List.sortBy
+                (\bucket ->
+                    if isNegatedProblemKind bucket.key then
+                        ( problemKindComplement bucket.key, 1 )
+
+                    else
+                        ( bucket.key, 0 )
+                )
     in
     []
         |> viewBucket
             Search.RadioInput
             "Package sets"
+            Icons.grid_view
             (result.aggregations.package_attr_set.buckets |> sortBuckets)
             (createBucketsMsg True .packageSets (\s v -> { s | packageSets = v }))
             selectedBucket.packageSets
         |> viewBucket
             Search.CheckboxInput
             "Licenses"
+            Icons.balance
             (result.aggregations.package_license_set.buckets |> sortBuckets)
             (createBucketsMsg False .licenses (\s v -> { s | licenses = v }))
             selectedBucket.licenses
         |> viewBucket
             Search.CheckboxInput
             "Maintainers"
+            Icons.people
             (result.aggregations.package_maintainers_set.buckets |> sortBuckets)
             (createBucketsMsg False .maintainers (\s v -> { s | maintainers = v }))
             selectedBucket.maintainers
         |> viewBucket
             Search.CheckboxInput
             "Teams"
+            Icons.groups
             (result.aggregations.package_teams_set.buckets |> sortBuckets)
             (createBucketsMsg False .teams (\s v -> { s | teams = v }))
             selectedBucket.teams
         |> viewBucket
             Search.CheckboxInput
             "Platforms"
+            Icons.computer
             (result.aggregations.package_platforms.buckets |> sortBuckets)
             (createBucketsMsg False .platforms (\s v -> { s | platforms = v }))
             selectedBucket.platforms
         |> viewBucket
             Search.CheckboxInput
             "Categories"
+            Icons.category
             (result.aggregations.package_categories_set.buckets |> sortBuckets)
             (createBucketsMsg False .categories (\s v -> { s | categories = v }))
             selectedBucket.categories
         |> viewBucket
             Search.CheckboxInput
             "File types"
+            Icons.insert_drive_file
             (result.aggregations.package_mime_types_set.buckets |> sortBuckets)
             (createBucketsMsg False .mimeTypes (\s v -> { s | mimeTypes = v }))
             selectedBucket.mimeTypes
+        |> viewBucket
+            Search.CheckboxInput
+            "Statuses"
+            Icons.warning
+            (result.aggregations.package_problem_kinds_set.buckets |> sortProblemKindBuckets)
+            (toggleProblemKind selectedBucket.problemKinds
+                >> updateBucketsMsg (\s v -> { s | problemKinds = v })
+            )
+            selectedBucket.problemKinds
+
+
+isNegatedProblemKind : String -> Bool
+isNegatedProblemKind =
+    String.startsWith "not "
+
+
+{-| The other half of a `package_problem_kinds_set` value: `broken` for
+`not broken`, and the reverse.
+-}
+problemKindComplement : String -> String
+problemKindComplement kind =
+    if isNegatedProblemKind kind then
+        String.dropLeft 4 kind
+
+    else
+        "not " ++ kind
+
+
+{-| Toggle a value of the problems facet. The selected values must all be true
+for one package, thus selecting a value clears its other half.
+-}
+toggleProblemKind : List String -> String -> List String
+toggleProblemKind selected value =
+    Utils.toggleList
+        (List.filter ((/=) (problemKindComplement value)) selected)
+        value
+
+
+viewProblemLabel : ResultPackageProblem -> Html msg
+viewProblemLabel problem =
+    span
+        [ class "badge package-problem-label"
+        , class ("package-problem-" ++ problem.kind)
+        , title (Maybe.withDefault "" problem.message)
+        ]
+        [ text problem.kind ]
+
+
+viewProblem : ResultPackageProblem -> Html msg
+viewProblem problem =
+    li []
+        [ viewProblemLabel problem
+        , span [ class "package-problem-message" ]
+            [ text (String.trim (Maybe.withDefault "" problem.message)) ]
+        , if List.isEmpty problem.urls then
+            text ""
+
+          else
+            ul []
+                (List.map
+                    (\url -> li [] [ a [ href url ] [ text url ] ])
+                    problem.urls
+                )
+        ]
 
 
 viewSuccess :
@@ -713,7 +817,7 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
 
             else
                 div []
-                    [ h4 [] [ text "Desktop Entries" ]
+                    [ h3 [] [ text "Desktop Entries" ]
                     , ul [ class "desktop-entries" ]
                         (List.map viewDesktopEntry displayedEntries)
                     ]
@@ -942,7 +1046,7 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
                                 text ""
                 in
                 div []
-                    [ h4 [] [ text "Screenshots" ]
+                    [ h3 [] [ text "Screenshots" ]
                     , div [ class "screenshots-row" ]
                         (optionals scrollable
                             [ scrollButton rowId -1.0 "Show the previous screenshots" ]
@@ -1129,9 +1233,9 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
                     List.filterMap (\m -> m.email) maintainers
             in
             optionals (List.length maintainerMails > 1)
-                [ a
-                    [ href ("mailto:" ++ String.join "," maintainerMails) ]
-                    [ li [ class "maintainer-list-item" ]
+                [ li [ class "maintainer-list-item" ]
+                    [ a
+                        [ class "mail-all-maintainers", href ("mailto:" ++ String.join "," maintainerMails) ]
                         [ text "✉️ Mail to all maintainers" ]
                     ]
                 ]
@@ -1151,7 +1255,7 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
         maintainersTeamsAndPlatforms =
             div [ class "package-maintainers-platforms" ]
                 [ div [ class "package-details-maintainers" ]
-                    [ h4 [] [ text "Maintainers" ]
+                    [ h3 [] [ text "Maintainers" ]
                     , if List.isEmpty item.source.maintainers then
                         p [] [ text "This package has no maintainers. If you find it useful, please consider becoming a maintainer!" ]
 
@@ -1164,12 +1268,12 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
                     ]
                 , div []
                     (optionals (not (List.isEmpty item.source.teams))
-                        [ h4 [] [ text "Teams" ]
+                        [ h3 [] [ text "Teams" ]
                         , ul [] (List.map showTeam item.source.teams)
                         ]
                     )
                 , div []
-                    [ h4 [] [ text "Platforms" ]
+                    [ h3 [] [ text "Platforms" ]
                     , if List.isEmpty item.source.platforms then
                         p [] [ text "This package does not list its available platforms." ]
 
@@ -1196,7 +1300,7 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
                         text p
             in
             div [ class "package-programs" ]
-                [ h4 [] [ text "Programs provided" ]
+                [ h3 [] [ text "Programs provided" ]
                 , if List.isEmpty sortedPrograms then
                     p [] [ text "This package provides no programs." ]
 
@@ -1228,7 +1332,7 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
             let
                 searchLink heading label term url =
                     div []
-                        [ h4 [] [ text heading ]
+                        [ h3 [] [ text heading ]
                         , p []
                             [ a [ href url ]
                                 [ text label
@@ -1319,8 +1423,19 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
 
                 items ->
                     div [ class "package-popularity" ]
-                        [ h4 [] [ text "Popularity" ]
+                        [ h3 [] [ text "Popularity" ]
                         , ul [] items
+                        ]
+
+        problems =
+            case item.source.problems of
+                [] ->
+                    text ""
+
+                items ->
+                    div [ class "package-problems" ]
+                        [ h3 [] [ text "Problems" ]
+                        , ul [] (List.map viewProblem items)
                         ]
 
         longerPackageDetails =
@@ -1331,6 +1446,7 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
                             |> Maybe.andThen Utils.showHtml
                             |> Maybe.withDefault []
                         )
+                    , problems
                     , case item.source.flakeUrl of
                         Just ( flakeUrl, _ ) ->
                             viewFlakeUsage item.source.attr_name flakeUrl
@@ -1341,6 +1457,11 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
                     , desktopEntries
                     , screenshots
                     , maintainersTeamsAndPlatforms
+                    , if List.isEmpty item.source.nixosModules then
+                        text ""
+
+                      else
+                        viewNixosModules channel item.source.nixosModules
                     , optionsLink
                     , popularity
                     , if List.isEmpty item.source.modularServices then
@@ -1389,7 +1510,17 @@ viewResultItem saveData showIconMargin screenshotShown nixosChannels channel sho
         , classList [ ( "opened", isOpen ), ( "with-icon-margin", showIconMargin ) ]
         , Search.elementId item.source.attr_name
         ]
-        ([ span [ class "search-result-title" ] (packageIcon :: flakeOrNixpkgs)
+        ([ span [ class "search-result-title" ]
+            (packageIcon
+                :: flakeOrNixpkgs
+                ++ (item.source.problems
+                        |> List.map .kind
+                        |> List.Extra.unique
+                        |> List.filterMap (\kind -> List.Extra.find (\problem -> problem.kind == kind) item.source.problems)
+                        -- A space goes away at a line break, thus a label on a new line starts in the column of the name.
+                        |> List.concatMap (\problem -> [ text " ", viewProblemLabel problem ])
+                   )
+            )
          , div [ class "package-description" ] [ text <| Maybe.withDefault "" item.source.description ]
          , shortPackageDetails
          , Search.showMoreButton toggle isOpen
@@ -1564,10 +1695,28 @@ viewUsageInstructions attrName currentMethod =
             ]
 
 
+viewNixosModules : String -> List String -> Html msg
+viewNixosModules channel nixosModules =
+    div []
+        [ h3 [] [ text "NixOS modules" ]
+        , p [] [ text "These modules set up this package on NixOS." ]
+        , ul [] (List.map (viewNixosModule channel) nixosModules)
+        ]
+
+
+viewNixosModule : String -> String -> Html msg
+viewNixosModule channel nixosModule =
+    li []
+        [ a
+            [ href ("/options?channel=" ++ channel ++ "&query=" ++ nixosModule) ]
+            [ code [] [ text nixosModule ] ]
+        ]
+
+
 viewModularServices : String -> String -> List String -> Html msg
 viewModularServices channel attrName modularServices =
     div []
-        [ h4 []
+        [ h3 []
             [ text "Modular Services"
             , text " "
             , a
@@ -1842,6 +1991,7 @@ encodeRequestBody query from size maybeBuckets sort =
         , ( "package_platforms", currentBuckets.platforms )
         , ( "package_categories_set", currentBuckets.categories )
         , ( "package_mime_types_set", currentBuckets.mimeTypes )
+        , ( Search.Query.problemKindsField, currentBuckets.problemKinds )
         ]
 
 
@@ -1864,6 +2014,7 @@ encodeBuckets options =
         , ( "package_platforms", Json.Encode.list Json.Encode.string options.platforms )
         , ( "package_categories_set", Json.Encode.list Json.Encode.string options.categories )
         , ( "package_mime_types_set", Json.Encode.list Json.Encode.string options.mimeTypes )
+        , ( Search.Query.problemKindsField, Json.Encode.list Json.Encode.string options.problemKinds )
         ]
 
 
@@ -1884,6 +2035,7 @@ decodeBuckets =
         |> strings "package_platforms"
         |> strings "package_categories_set"
         |> strings "package_mime_types_set"
+        |> strings Search.Query.problemKindsField
 
 
 decodeResultItemSource : Json.Decode.Decoder ResultItemSource
@@ -1913,11 +2065,21 @@ decodeResultItemSource =
         |> Json.Decode.Pipeline.optional "flake_description" (Json.Decode.map Just Json.Decode.string) Nothing
         |> Json.Decode.Pipeline.optional "flake_resolved" (Json.Decode.map Just decodeResolvedFlake) Nothing
         |> Json.Decode.Pipeline.optional "package_modular_services" (Json.Decode.list Json.Decode.string) []
+        |> Json.Decode.Pipeline.optional "package_nixos_modules" (Json.Decode.list Json.Decode.string) []
         |> Json.Decode.Pipeline.optional "package_desktop_entries" (Json.Decode.list decodeDesktopEntry) []
         |> Json.Decode.Pipeline.optional "package_desktop_icons" (Json.Decode.dict Json.Decode.string) Dict.empty
         |> Json.Decode.Pipeline.optional "package_screenshots" (Json.Decode.list decodeScreenshot) []
         |> Json.Decode.Pipeline.optional "package_dep_count" (Json.Decode.map Just Json.Decode.int) Nothing
         |> Json.Decode.Pipeline.optional "package_repology_repos" (Json.Decode.map Just Json.Decode.int) Nothing
+        |> Json.Decode.Pipeline.optional "package_problems" (Json.Decode.list decodeResultPackageProblem) []
+
+
+decodeResultPackageProblem : Json.Decode.Decoder ResultPackageProblem
+decodeResultPackageProblem =
+    Json.Decode.map3 ResultPackageProblem
+        (Json.Decode.field "kind" Json.Decode.string)
+        (Json.Decode.field "message" (Json.Decode.nullable Json.Decode.string))
+        (Json.Decode.field "urls" (Json.Decode.list Json.Decode.string))
 
 
 decodeDesktopEntry : Json.Decode.Decoder DesktopEntry
@@ -2125,27 +2287,33 @@ decodeResultAggregations =
         -- Each facet is counted inside a `filter` aggregation of the same
         -- name, see `Search.Query.toAggregations`.
         filtered field =
-            Json.Decode.at [ field, field ] Search.decodeAggregation
+            Json.Decode.Pipeline.requiredAt [ field, field ] Search.decodeAggregation
     in
-    Json.Decode.map8 ResultAggregations
-        (Json.Decode.field "all" decodeAggregations)
-        (filtered "package_platforms")
-        (filtered "package_attr_set")
-        (filtered "package_maintainers_set")
-        (filtered "package_teams_set")
-        (filtered "package_license_set")
-        (filtered "package_categories_set")
-        (filtered "package_mime_types_set")
+    Json.Decode.succeed ResultAggregations
+        |> Json.Decode.Pipeline.required "all" decodeAggregations
+        |> filtered "package_platforms"
+        |> filtered "package_attr_set"
+        |> filtered "package_maintainers_set"
+        |> filtered "package_teams_set"
+        |> filtered "package_license_set"
+        |> filtered "package_categories_set"
+        |> filtered "package_mime_types_set"
+        |> filtered Search.Query.problemKindsField
 
 
 decodeAggregations : Json.Decode.Decoder Aggregations
 decodeAggregations =
-    Json.Decode.map8 Aggregations
-        (Json.Decode.field "doc_count" Json.Decode.int)
-        (Json.Decode.field "package_platforms" Search.decodeAggregation)
-        (Json.Decode.field "package_attr_set" Search.decodeAggregation)
-        (Json.Decode.field "package_maintainers_set" Search.decodeAggregation)
-        (Json.Decode.field "package_teams_set" Search.decodeAggregation)
-        (Json.Decode.field "package_license_set" Search.decodeAggregation)
-        (Json.Decode.field "package_categories_set" Search.decodeAggregation)
-        (Json.Decode.field "package_mime_types_set" Search.decodeAggregation)
+    let
+        facet field =
+            Json.Decode.Pipeline.required field Search.decodeAggregation
+    in
+    Json.Decode.succeed Aggregations
+        |> Json.Decode.Pipeline.required "doc_count" Json.Decode.int
+        |> facet "package_platforms"
+        |> facet "package_attr_set"
+        |> facet "package_maintainers_set"
+        |> facet "package_teams_set"
+        |> facet "package_license_set"
+        |> facet "package_categories_set"
+        |> facet "package_mime_types_set"
+        |> facet Search.Query.problemKindsField

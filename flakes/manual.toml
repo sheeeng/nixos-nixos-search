@@ -30,6 +30,10 @@ url = "git+https://codeberg.org/raboof/mock-oauth2-server?ref=nix"
 
 [[sources]]
 type = "git"
+url = "git+https://codeberg.org/viperML/wrapper-manager?ref=master"
+
+[[sources]]
+type = "git"
 url = "git+https://codeberg.org/wolfangaukang/python-trovo?ref=main"
 
 # wolfangaukang is no longer in 'maintainers'
@@ -269,6 +273,11 @@ repo = "nix-interactive"
 
 [[sources]]
 type = "github"
+owner = "George-Miao"
+repo = "flakes"
+
+[[sources]]
+type = "github"
 owner = "gmodena"
 repo = "nix-flatpak"
 
@@ -296,11 +305,6 @@ repo = "flake-parts"
 type = "github"
 owner = "hyprwm"
 repo = "hyprland"
-
-[[sources]]
-type = "github"
-owner = "Hythera"
-repo = "nix-waterfox"
 
 [[sources]]
 type = "github"
@@ -520,6 +524,11 @@ repo = "PrismLauncher"
 
 [[sources]]
 type = "github"
+owner = "prithvihv"
+repo = "logseq-db-nix"
+
+[[sources]]
+type = "github"
 owner = "pyproject-nix"
 repo = "pyproject.nix"
 
@@ -552,11 +561,6 @@ repo = "free5gc.nix"
 type = "github"
 owner = "ryantm"
 repo = "agenix"
-
-[[sources]]
-type = "github"
-owner = "sincorchetes"
-repo = "nixos-flake-hardware-profiles"
 
 [[sources]]
 type = "github"
@@ -673,11 +677,6 @@ repo = "nativelink"
 type = "github"
 owner = "utensils"
 repo = "mcp-nixos"
-
-[[sources]]
-type = "github"
-owner = "viperML"
-repo = "wrapper-manager"
 
 [[sources]]
 type = "github"

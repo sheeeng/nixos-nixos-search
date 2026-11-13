@@ -33,7 +33,6 @@ import Html
         , li
         , pre
         , span
-        , strong
         , text
         , ul
         )
@@ -55,6 +54,8 @@ import Http exposing (Body)
 import Json.Decode
 import Json.Decode.Pipeline
 import List.Extra
+import Material.Icons as Icons
+import Material.Icons.Types as IconsTypes
 import Ports
 import RemoteData
 import Route exposing (OptionSource, SearchType)
@@ -68,7 +69,7 @@ import Search.Query
 import SyntaxHighlight exposing (elm, oneDark, toBlockHtml, useTheme)
 import Task
 import Url
-import Utils
+import Utils exposing (basicTextIcon)
 
 
 
@@ -182,13 +183,24 @@ update navKey msg model nixosChannels =
 
 view :
     List NixOSChannel
+    -> Dict String Int
     -> Model
     -> Html Msg
-view nixosChannels model =
+view nixosChannels docCounts model =
+    let
+        -- The options of all sources, because the page searches all of them.
+        optionCount =
+            if Dict.isEmpty docCounts then
+                Nothing
+
+            else
+                Route.allOptionSources
+                    |> List.filterMap (\source -> Dict.get (Route.optionSourceDocType source) docCounts)
+                    |> List.sum
+                    |> Just
+    in
     Search.view { categoryName = "options" }
-        [ text "Search more than "
-        , strong [] [ text "20 000 options" ]
-        ]
+        (Search.viewCountTitle "options" optionCount)
         nixosChannels
         model
         (viewSuccess model.activeOptionSource)
@@ -217,7 +229,7 @@ viewSourceTabs activeSource sourceCounts =
                 sources ->
                     Just
                         (fieldset [ class "search-source-tabs search-bucket" ]
-                            (legend [ class "header" ] [ text (sourceCategoryLabel category) ]
+                            (legend [ class "header" ] [ basicTextIcon (sourceCategoryIcon category) (sourceCategoryLabel category) ]
                                 :: List.map (viewSourceTab activeSource sourceCounts) sources
                             )
                         )
@@ -309,6 +321,22 @@ sourceCategoryLabel category =
 
         Experimental ->
             "Experimental"
+
+
+sourceCategoryIcon : SourceCategory -> IconsTypes.Icon i
+sourceCategoryIcon category =
+    case category of
+        Official ->
+            Icons.check
+
+        Community ->
+            Icons.diversity_3
+
+        External ->
+            Icons.public
+
+        Experimental ->
+            Icons.science
 
 
 {-| Compact rendering of a hit count for the tab badge: 1.2k, 23k, etc.

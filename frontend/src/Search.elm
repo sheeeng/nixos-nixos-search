@@ -6,7 +6,7 @@ module Search exposing
     , Model
     , Msg(..)
     , NixOSChannel
-    , NixOSChannelStatus
+    , NixOSChannelStatus(..)
     , NixOSChannels
     , Options
     , ResultHits
@@ -21,6 +21,7 @@ module Search exposing
     , defaultFlakeId
     , elementId
     , init
+    , makeDocCountsRequest
     , makeRequest
     , makeRequestTask
     , shouldLoad
@@ -29,6 +30,8 @@ module Search exposing
     , update
     , view
     , viewBucket
+    , viewChannels
+    , viewCountTitle
     , viewFlakes
     , viewResult
     , viewSearchInput
@@ -72,6 +75,7 @@ import Html.Attributes
         , class
         , classList
         , disabled
+        , for
         , href
         , id
         , name
@@ -91,6 +95,8 @@ import Html.Events
 import Http
 import Json.Decode
 import Json.Decode.Pipeline
+import Material.Icons as Icons
+import Material.Icons.Types as IconsTypes
 import RemoteData
 import Route
     exposing
@@ -103,6 +109,8 @@ import Search.Typeahead as Typeahead
 import Svg exposing (path, rect, svg)
 import Svg.Attributes as SA
 import Task
+import Url.Builder
+import Utils exposing (basicTextIcon)
 
 
 type alias Model a b =
@@ -847,6 +855,35 @@ view { categoryName } title nixosChannels model viewSuccess viewBuckets outMsg s
         )
 
 
+{-| The page heading, with the number of documents of the channel when it is
+known.
+-}
+viewCountTitle : String -> Maybe Int -> List (Html c)
+viewCountTitle noun maybeCount =
+    case maybeCount of
+        Just count ->
+            [ text "Search "
+            , strong [] [ text (groupThousands count ++ " " ++ noun) ]
+            ]
+
+        Nothing ->
+            [ text ("Search " ++ noun) ]
+
+
+{-| Write a number with a comma between each group of three digits:
+`143000` becomes "143,000".
+-}
+groupThousands : Int -> String
+groupThousands n =
+    if n < 1000 then
+        String.fromInt n
+
+    else
+        groupThousands (n // 1000)
+            ++ "\u{202F}"
+            ++ String.padLeft 3 '0' (String.fromInt (modBy 1000 n))
+
+
 viewFlakes :
     (Msg a b -> msg)
     -> SearchType
@@ -855,6 +892,7 @@ viewFlakes outMsg selectedCategory =
     viewBucket
         RadioInput
         "Category"
+        Icons.category
         (List.map (\cat -> { key = searchTypeToTitle cat, doc_count = 0 }) allTypes)
         (\title ->
             outMsg
@@ -933,7 +971,9 @@ viewResult nixosChannels outMsg categoryName model viewSuccess viewBuckets searc
             in
             if result.hits.total.value == 0 && List.isEmpty buckets then
                 div [ class "search-results" ]
-                    [ viewNoResults categoryName model.activeOptionSource model.query model.channel
+                    [ aside [ class "search-sidebar" ] searchBuckets
+                    , div [ class "search-results-main" ]
+                        [ viewNoResults categoryName model.activeOptionSource model.query model.channel ]
                     ]
 
             else
@@ -1077,12 +1117,13 @@ type BucketInputType
 viewBucket :
     BucketInputType
     -> String
+    -> IconsTypes.Icon a
     -> List AggregationsBucketItem
     -> (String -> a)
     -> List String
     -> List (Html a)
     -> List (Html a)
-viewBucket inputType title buckets_ searchMsgFor selectedBucket sets =
+viewBucket inputType title icon buckets_ searchMsgFor selectedBucket sets =
     let
         -- The other facets filter the counts of this facet. A selected value
         -- can thus fall out of the top values or go to zero. Keep it, so that
@@ -1101,7 +1142,7 @@ viewBucket inputType title buckets_ searchMsgFor selectedBucket sets =
 
          else
             [ fieldset [ class "search-bucket" ]
-                (legend [ class "header" ] [ text title ]
+                (legend [ class "header" ] [ basicTextIcon icon title ]
                     :: List.map
                         (viewBucketItem inputType title searchMsgFor selectedBucket)
                         buckets
@@ -1198,7 +1239,7 @@ viewSearchInput nixosChannels outMsg categoryName selectedChannel searchQuery ma
             ]
         , div [ class "search-input-options" ]
             ((selectedChannel
-                |> Maybe.map (\x -> viewChannels nixosChannels outMsg x)
+                |> Maybe.map (viewChannels (outMsg << ChannelChange) nixosChannels)
                 |> Maybe.withDefault []
              )
                 ++ [ Html.map outMsg (viewSortSelection currentSort) ]
@@ -1215,12 +1256,14 @@ hideTypeaheadOnEscape outMsg key =
         Json.Decode.fail "not Escape"
 
 
+{-| The channel selection. The pages that show data of one channel use it.
+-}
 viewChannels :
-    List NixOSChannel
-    -> (Msg a b -> c)
+    (String -> msg)
+    -> List NixOSChannel
     -> String
-    -> List (Html c)
-viewChannels nixosChannels outMsg selectedChannel =
+    -> List (Html msg)
+viewChannels toMsg nixosChannels selectedChannel =
     if List.isEmpty nixosChannels then
         []
 
@@ -1230,7 +1273,7 @@ viewChannels nixosChannels outMsg selectedChannel =
                 [ class "radio-group-segmented channel-radios" ]
                 (legend [ class "channel-title" ] [ text "Channels:" ]
                     :: List.map
-                        (viewChannelRadio outMsg selectedChannel)
+                        (viewChannelRadio toMsg selectedChannel)
                         nixosChannels
                 )
             ]
@@ -1246,8 +1289,8 @@ viewChannels nixosChannels outMsg selectedChannel =
             )
 
 
-viewChannelRadio : (Msg a b -> c) -> String -> NixOSChannel -> Html c
-viewChannelRadio outMsg selectedChannel channel =
+viewChannelRadio : (String -> msg) -> String -> NixOSChannel -> Html msg
+viewChannelRadio toMsg selectedChannel channel =
     label
         [ classList
             [ ( "btn", True )
@@ -1260,7 +1303,7 @@ viewChannelRadio outMsg selectedChannel channel =
             [ type_ "radio"
             , name "channel"
             , checked (channel.id == selectedChannel)
-            , onClick <| outMsg (ChannelChange channel.id)
+            , onClick (toMsg channel.id)
             ]
             []
         ]
@@ -1364,7 +1407,7 @@ viewSortSelection :
 viewSortSelection currentSort =
     Html.node "sort-select-wrapper"
         [ class "btn pull-right sort-container" ]
-        [ span [ class "sort-label" ] [ text "Sort: " ]
+        [ label [ for "sort-select", class "sort-label" ] [ basicTextIcon Icons.sort "Sort: " ]
         , select
             [ id "sort-select"
             , name "sort"
@@ -1567,6 +1610,44 @@ makeRequestTask body nixosChannels channel decodeResultItemSource decodeResultAg
                         Http.BadUrl_ url ->
                             Err (Http.BadUrl url)
         , timeout = Nothing
+        }
+
+
+{-| Count the documents of each `type`, for example `package` or `option`, in
+the index of each channel. The `/counts` edge function sends the query to
+Elasticsearch, and the CDN and the browser keep its response for one day. The
+URL contains the names of the indexes, thus a new channel or a new index version
+uses a new cache entry.
+-}
+makeDocCountsRequest :
+    Options
+    -> List NixOSChannel
+    -> (Result Http.Error (Dict String (Dict String Int)) -> msg)
+    -> Cmd msg
+makeDocCountsRequest options nixosChannels toMsg =
+    let
+        indexOf channel =
+            "latest-" ++ String.fromInt options.mappingSchemaVersion ++ "-" ++ channel.branch
+
+        -- The response uses the index names as keys, the model uses the channel IDs.
+        toChannelCounts countsByIndex =
+            nixosChannels
+                |> List.filterMap
+                    (\channel ->
+                        Dict.get (indexOf channel) countsByIndex
+                            |> Maybe.map (Tuple.pair channel.id)
+                    )
+                |> Dict.fromList
+    in
+    Http.get
+        { url =
+            Url.Builder.absolute [ "counts" ]
+                (List.map (indexOf >> Url.Builder.string "index") nixosChannels)
+        , expect =
+            Http.expectJson toMsg
+                (Json.Decode.dict (Json.Decode.dict Json.Decode.int)
+                    |> Json.Decode.map toChannelCounts
+                )
         }
 
 
